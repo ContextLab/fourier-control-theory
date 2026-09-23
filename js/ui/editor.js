@@ -1,8 +1,12 @@
 // Component list editor: add/remove, numeric + slider inputs for freq/amp/phase.
 // Patches existing DOM in place on external changes (arm drag, spectrum drag, presets,
 // draw "send to arm"); only rebuilds the whole list when components are added/removed
-// or reordered. Skips re-render entirely when the store change originated from this
-// module itself (source === 'editor'), since the inputs already show the typed value.
+// or reordered. When a change originates from this module itself (source === 'editor'),
+// patchRow() still runs, but it skips whichever field is currently focused so it never
+// fights the value the person is typing; that's what lets a sanitized/clamped value
+// (see MAX_FREQ/MAX_AMP below) become visible again as soon as the field blurs.
+
+import { MAX_FREQ, MAX_AMP } from '../core/store.js';
 
 const RAD2DEG = 180 / Math.PI;
 const DEG2RAD = Math.PI / 180;
@@ -11,8 +15,16 @@ function fmtAmp(v) {
   return Number.isFinite(v) ? String(Math.round(v * 1000) / 1000) : '0';
 }
 
+/** Wraps radians to (-180, 180] degrees for display. */
+function wrapDeg180(deg) {
+  let wrapped = deg % 360;
+  if (wrapped <= -180) wrapped += 360;
+  if (wrapped > 180) wrapped -= 360;
+  return wrapped;
+}
+
 function fmtDeg(v) {
-  return String(Math.round((v * RAD2DEG) % 360));
+  return String(Math.round(wrapDeg180(v * RAD2DEG)));
 }
 
 /**
@@ -49,48 +61,60 @@ function buildRow(component, store) {
   swatch.style.background = component.color || '#888';
   row.appendChild(swatch);
 
+  const freqTitle = `Frequency in cycles/period, an integer from −${MAX_FREQ} to ${MAX_FREQ}`;
   const freqField = document.createElement('div');
   freqField.className = 'editor-field';
   const freqInput = document.createElement('input');
   freqInput.type = 'number';
   freqInput.step = '1';
+  freqInput.min = String(-MAX_FREQ);
+  freqInput.max = String(MAX_FREQ);
+  freqInput.title = freqTitle;
   freqInput.value = String(component.freq);
   const freqSlider = document.createElement('input');
   freqSlider.type = 'range';
-  freqSlider.min = '-32';
-  freqSlider.max = '32';
+  freqSlider.min = String(-MAX_FREQ);
+  freqSlider.max = String(MAX_FREQ);
   freqSlider.step = '1';
+  freqSlider.title = freqTitle;
   freqSlider.value = String(component.freq);
   freqField.append(freqInput, freqSlider);
   row.appendChild(freqField);
 
+  const ampTitle = `Amplitude (link length), from 0 to ${MAX_AMP}`;
   const ampField = document.createElement('div');
   ampField.className = 'editor-field';
   const ampInput = document.createElement('input');
   ampInput.type = 'number';
   ampInput.step = '0.01';
   ampInput.min = '0';
+  ampInput.max = String(MAX_AMP);
+  ampInput.title = ampTitle;
   ampInput.value = fmtAmp(component.amp);
   const ampSlider = document.createElement('input');
   ampSlider.type = 'range';
   ampSlider.min = '0';
-  ampSlider.max = '2';
+  ampSlider.max = String(MAX_AMP);
   ampSlider.step = '0.01';
+  ampSlider.title = ampTitle;
   ampSlider.value = fmtAmp(component.amp);
   ampField.append(ampInput, ampSlider);
   row.appendChild(ampField);
 
+  const phaseTitle = 'Phase in degrees, wrapped to (−180°, 180°]';
   const phaseField = document.createElement('div');
   phaseField.className = 'editor-field';
   const phaseInput = document.createElement('input');
   phaseInput.type = 'number';
   phaseInput.step = '1';
+  phaseInput.title = phaseTitle;
   phaseInput.value = fmtDeg(component.phase);
   const phaseSlider = document.createElement('input');
   phaseSlider.type = 'range';
   phaseSlider.min = '-180';
   phaseSlider.max = '180';
   phaseSlider.step = '1';
+  phaseSlider.title = phaseTitle;
   phaseSlider.value = fmtDeg(component.phase);
   phaseField.append(phaseInput, phaseSlider);
   row.appendChild(phaseField);
@@ -98,6 +122,7 @@ function buildRow(component, store) {
   const removeBtn = document.createElement('button');
   removeBtn.className = 'btn-icon remove-btn';
   removeBtn.setAttribute('aria-label', 'Remove component');
+  removeBtn.title = 'Remove this component';
   removeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
   row.appendChild(removeBtn);
 
@@ -110,14 +135,16 @@ function buildRow(component, store) {
     store.updateComponent(component.id, { freq: Math.round(value) }, 'editor');
   });
   bindPair(ampInput, ampSlider, (value) => {
-    store.updateComponent(component.id, { amp: Math.max(0, value) }, 'editor');
+    store.updateComponent(component.id, { amp: Math.max(0, Math.min(MAX_AMP, value)) }, 'editor');
   });
   bindPair(phaseInput, phaseSlider, (value) => {
     store.updateComponent(component.id, { phase: value * DEG2RAD }, 'editor');
   });
 
   removeBtn.addEventListener('click', () => {
-    store.removeComponent(component.id);
+    const wasSelected = store.get().selectedId === component.id;
+    store.removeComponent(component.id, 'editor');
+    if (wasSelected) store.set({ selectedId: null }, 'editor');
   });
 
   return { el: row, freqInput, freqSlider, ampInput, ampSlider, phaseInput, phaseSlider, swatch };
@@ -146,10 +173,23 @@ function patchRow(row, component) {
  */
 export function createEditor(container, store) {
   const rows = new Map();
+  let idOrder = [];
+
+  function renderEmptyHint() {
+    const hint = document.createElement('div');
+    hint.className = 'editor-empty-hint';
+    hint.textContent = 'No components — click + Add or pick a preset.';
+    container.appendChild(hint);
+  }
 
   function fullRebuild(state) {
     container.innerHTML = '';
     rows.clear();
+    idOrder = state.components.map((c) => c.id);
+    if (state.components.length === 0) {
+      renderEmptyHint();
+      return;
+    }
     for (const component of state.components) {
       const row = buildRow(component, store);
       rows.set(component.id, row);
@@ -164,25 +204,40 @@ export function createEditor(container, store) {
     }
   }
 
+  // True when the component list still has the same ids in the same order,
+  // so rows can be patched in place instead of rebuilding the DOM (e.g. for a
+  // "Sort by |f|" reorder, this must be false so fullRebuild picks up the new order).
   function sameShape(components) {
-    if (components.length !== rows.size) return false;
-    return components.every((c) => rows.has(c.id));
+    if (components.length !== idOrder.length) return false;
+    return components.every((c, i) => idOrder[i] === c.id);
   }
 
   function onStoreChange(state, changedKeys, source) {
-    if (source === 'editor') return;
+    // selectedId highlighting always applies, even for changes this module
+    // itself caused (e.g. clicking a row sets selectedId with source 'editor').
+    if (changedKeys.has('selectedId')) {
+      updateSelection(state.selectedId);
+    }
     if (changedKeys.has('components')) {
       if (!sameShape(state.components)) {
         fullRebuild(state);
       } else {
+        // patchRow() itself skips whichever field is focused, so re-running it
+        // for our own edits is safe and is what lets a sanitized/clamped
+        // value (e.g. an out-of-range freq or amp) show up once the field blurs.
         for (const component of state.components) {
           patchRow(rows.get(component.id), component);
         }
       }
     }
-    if (changedKeys.has('selectedId')) {
-      updateSelection(state.selectedId);
-    }
+  }
+
+  const sortBtn = document.getElementById('sort-by-freq');
+  if (sortBtn) {
+    sortBtn.addEventListener('click', () => {
+      const sorted = [...store.get().components].sort((a, b) => Math.abs(a.freq) - Math.abs(b.freq));
+      store.setComponents(sorted, 'editor');
+    });
   }
 
   fullRebuild(store.get());

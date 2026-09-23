@@ -4,45 +4,41 @@ import { resampleArcLength, dft, idftEval, topK, fromCoeff } from '../core/fouri
 import { jointPositions } from '../core/arm.js';
 
 const PALETTE = ['#267aba', '#ffa00f', '#a5d75f', '#8a6996', '#d94415', '#f5dc69', '#c4dd88', '#9d162e'];
-const K_MIN = 1;
-const K_MAX = 512;
+export const K_MIN = 1;
+export const K_MAX = 512;
 const RESAMPLE_N = 512;
 const TRAIL_POINTS = 240;
-
-// Workaround: store.setComponents() does not assign ids/colors to id-less
-// entries (only store.addComponent() does), so components sharing id ===
-// undefined would all match each other in removeComponent/updateComponent.
-// Stamp fresh ids from a block far above anything store.addComponent will
-// ever generate.
-let externalIdCounter = 2000000;
-function withIdsAndColors(list) {
-  return list.map((c, i) => ({ ...c, id: externalIdCounter++, color: PALETTE[i % PALETTE.length] }));
-}
+// A finished stroke shorter than this (in points, or in pixel bounding-box
+// extent) is treated as an accidental tap/click rather than a real drawing:
+// resampling/DFT-ing it would either be meaningless or (for a single
+// duplicate point) degenerate, so it's rejected with a hint instead of
+// silently producing a near-invisible dot.
+const MIN_STROKE_POINTS = 5;
+const MIN_STROKE_EXTENT_PX = 12;
 
 function paletteColor(i) {
   return PALETTE[i % PALETTE.length];
 }
 
-function sliderToK(pos, max = 1000) {
-  const t = Math.max(0, Math.min(1, pos / max));
+/** Maps a slider position in [min,max] to a log-spaced K in [K_MIN,K_MAX]. */
+export function sliderToK(pos, min, max) {
+  const t = max > min ? Math.max(0, Math.min(1, (pos - min) / (max - min))) : 0;
   const k = Math.round(Math.exp(Math.log(K_MIN) + t * (Math.log(K_MAX) - Math.log(K_MIN))));
   return Math.min(K_MAX, Math.max(K_MIN, k));
 }
 
-function kToSlider(k, max = 1000) {
-  const clamped = Math.min(K_MAX, Math.max(K_MIN, k));
-  const t = (Math.log(clamped) - Math.log(K_MIN)) / (Math.log(K_MAX) - Math.log(K_MIN));
-  return Math.round(t * max);
-}
-
-/** Standard parametric heart curve, used as the pre-loaded example drawing. */
+/**
+ * Standard parametric heart curve, used as the pre-loaded example drawing.
+ * Same formula (and orientation: y-up, no flip) as the Arm view's "heart"
+ * preset (js/core/presets.js heartPath) — lobes up, point down.
+ */
 function heartRawPoints(n = 300) {
   const pts = [];
   for (let i = 0; i < n; i += 1) {
     const t = (i / n) * 2 * Math.PI;
     const x = 16 * Math.sin(t) ** 3;
     const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
-    pts.push({ x, y: -y }); // flip so the heart points up in world (y-up) space
+    pts.push({ x, y });
   }
   return pts;
 }
@@ -77,9 +73,14 @@ export function createDrawView(canvas, store) {
   const followTipEl = document.getElementById('follow-tip');
   const sendToArmBtn = document.getElementById('send-to-arm');
 
-  let capturing = false;
+  // Whether a stroke is currently being traced (pointer down on the canvas).
+  // Drawing works directly (no need to arm it via a button first): any
+  // pointer drag on the canvas starts a new stroke.
+  let strokeActive = false;
   let rawWorldPts = [];
   let lastPixel = null;
+  let strokeBBoxPx = null; // pixel-space bounding box of the in-progress stroke
+  let playingBeforeStroke = false;
 
   // Cache of {resampled, coeffs} keyed by identity of state.drawing.raw, so RMS/topK
   // work doesn't recompute resampleArcLength every frame.
@@ -121,16 +122,22 @@ export function createDrawView(canvas, store) {
     rmsEl.textContent = rms.toFixed(4);
   }
 
-  function setDrawing(patch) {
-    store.set({ drawing: { ...store.get().drawing, ...patch } }, 'draw');
-  }
-
   function initExampleIfEmpty() {
     const state = store.get();
     if (state.drawing.coeffs && state.drawing.coeffs.length > 0) return;
     const raw = normalizePoints(heartRawPoints(300));
     const { coeffs } = computeCoeffs(raw);
     store.set({ drawing: { raw, coeffs, active: false } }, 'draw');
+  }
+
+  function clearDrawing() {
+    strokeActive = false;
+    rawWorldPts = [];
+    lastPixel = null;
+    strokeBBoxPx = null;
+    store.set({ drawing: { raw: [], coeffs: [], active: false } }, 'draw');
+    rmsEl.textContent = '—';
+    hintEl.textContent = 'Draw a closed shape';
   }
 
   // ---------- Pointer capture ----------
@@ -151,13 +158,28 @@ export function createDrawView(canvas, store) {
       if (d < 2) return;
     }
     lastPixel = { x: px, y: py };
-    rawWorldPts.push(world);
+    if (!strokeBBoxPx) {
+      strokeBBoxPx = { minX: px, maxX: px, minY: py, maxY: py };
+    } else {
+      strokeBBoxPx.minX = Math.min(strokeBBoxPx.minX, px);
+      strokeBBoxPx.maxX = Math.max(strokeBBoxPx.maxX, px);
+      strokeBBoxPx.minY = Math.min(strokeBBoxPx.minY, py);
+      strokeBBoxPx.maxY = Math.max(strokeBBoxPx.maxY, py);
+    }
+    // toWorld() returns {re, im}; every consumer of raw drawing points
+    // (resampleArcLength, the dashed-outline renderer, send-to-arm) expects
+    // {x, y}, so convert once, here, at the single point of entry.
+    rawWorldPts.push({ x: world.re, y: world.im });
   }
 
   function finishDrawing() {
-    capturing = false;
-    if (rawWorldPts.length < 3) {
-      hintEl.textContent = 'Draw a closed shape';
+    strokeActive = false;
+    const extent = strokeBBoxPx
+      ? Math.max(strokeBBoxPx.maxX - strokeBBoxPx.minX, strokeBBoxPx.maxY - strokeBBoxPx.minY)
+      : 0;
+    if (rawWorldPts.length < MIN_STROKE_POINTS || extent < MIN_STROKE_EXTENT_PX) {
+      hintEl.textContent = 'Stroke too short — trace a bigger closed shape';
+      store.set({ playing: playingBeforeStroke }, 'draw');
       return;
     }
     const { coeffs } = computeCoeffs(rawWorldPts);
@@ -166,36 +188,42 @@ export function createDrawView(canvas, store) {
   }
 
   canvas.addEventListener('pointerdown', (e) => {
-    if (!capturing) return;
     canvas.setPointerCapture(e.pointerId);
+    strokeActive = true;
     rawWorldPts = [];
     lastPixel = null;
+    strokeBBoxPx = null;
+    playingBeforeStroke = store.get().playing;
+    store.set({ playing: false }, 'draw');
+    hintEl.textContent = 'Trace a closed shape, release to finish';
     addPoint(e);
   });
   canvas.addEventListener('pointermove', (e) => {
-    if (!capturing || e.buttons !== 1) return;
+    if (!strokeActive || e.buttons !== 1) return;
     addPoint(e);
   });
   canvas.addEventListener('pointerup', () => {
-    if (!capturing) return;
+    if (!strokeActive) return;
     finishDrawing();
   });
-
-  drawStartBtn.addEventListener('click', () => {
-    capturing = true;
-    rawWorldPts = [];
-    lastPixel = null;
-    store.set({ playing: false }, 'draw');
-    hintEl.textContent = 'Trace a closed shape, release to finish';
-  });
-
-  drawClearBtn.addEventListener('click', () => {
-    capturing = false;
-    rawWorldPts = [];
-    store.set({ drawing: { raw: [], coeffs: [], active: false } }, 'draw');
-    rmsEl.textContent = '—';
+  canvas.addEventListener('pointercancel', () => {
+    if (!strokeActive) return;
+    strokeActive = false;
     hintEl.textContent = 'Draw a closed shape';
+    store.set({ playing: playingBeforeStroke }, 'draw');
   });
+
+  // Drawing now works directly (drag on the canvas at any time), so
+  // #draw-start is no longer required to "arm" a stroke. index.html (owned
+  // elsewhere) still wires this button up, so keep it working as a harmless
+  // clear-and-prompt shortcut rather than leaving it dead.
+  drawStartBtn.innerHTML = '<i class="fa-solid fa-pen"></i> Clear &amp; Draw';
+  drawStartBtn.addEventListener('click', () => {
+    clearDrawing();
+    hintEl.textContent = 'Trace a closed shape directly on the canvas';
+  });
+
+  drawClearBtn.addEventListener('click', clearDrawing);
 
   drawPlayBtn.addEventListener('click', () => {
     const s = store.get();
@@ -210,21 +238,35 @@ export function createDrawView(canvas, store) {
   store.subscribe((state) => syncPlayBtn(state), ['playing']);
   syncPlayBtn(store.get());
 
+  function currentK() {
+    const min = Number(kSlider.min) || 0;
+    const max = Number(kSlider.max) || 1000;
+    return sliderToK(parseFloat(kSlider.value), min, max);
+  }
+
   kSlider.addEventListener('input', () => {
-    const k = sliderToK(parseFloat(kSlider.value));
+    const k = currentK();
     kValueEl.textContent = String(k);
     store.set({ K: k }, 'draw');
     updateRms(store.get());
   });
-  kValueEl.textContent = String(sliderToK(parseFloat(kSlider.value)));
-  store.set({ K: sliderToK(parseFloat(kSlider.value)) }, 'draw');
+  kValueEl.textContent = String(currentK());
+  store.set({ K: currentK() }, 'draw');
 
   sendToArmBtn.addEventListener('click', () => {
     const state = store.get();
     if (!state.drawing.coeffs || state.drawing.coeffs.length === 0) return;
     const K = Math.max(K_MIN, Math.min(K_MAX, state.K));
     const topCoeffs = topK(state.drawing.coeffs, K);
-    const comps = withIdsAndColors(topCoeffs.map((c) => fromCoeff(c, {})));
+    // Guard against NaN: fromCoeff can only produce a non-finite freq/amp/
+    // phase if the source coefficients are already broken upstream, but the
+    // arm view/editor have no NaN handling of their own, so filter here
+    // rather than ever handing them a broken component. (store.setComponents
+    // assigns ids/colors itself; no need to stamp them here.)
+    const comps = topCoeffs
+      .map((c) => fromCoeff(c, {}))
+      .filter((c) => Number.isFinite(c.freq) && Number.isFinite(c.amp) && Number.isFinite(c.phase));
+    if (comps.length === 0) return;
     store.setComponents(comps, 'draw');
     store.set({ mode: 'arm' }, 'draw');
   });
@@ -236,6 +278,24 @@ export function createDrawView(canvas, store) {
 
   // ---------- Render ----------
 
+  function renderLiveInk(ctx, baseScale) {
+    if (rawWorldPts.length < 2) return;
+    const transform = makeTransform({ re: 0, im: 0 }, baseScale);
+    ctx.save();
+    ctx.strokeStyle = cssVar('--accent-color', '#ffa00f');
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    rawWorldPts.forEach((p, i) => {
+      const px = transform.toPx({ re: p.x, im: p.y });
+      if (i === 0) ctx.moveTo(px.x, px.y);
+      else ctx.lineTo(px.x, px.y);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+
   function render(state) {
     const { ctx, w, h } = canvasState;
     ctx.clearRect(0, 0, w, h);
@@ -243,6 +303,16 @@ export function createDrawView(canvas, store) {
     ctx.translate(w / 2, h / 2);
 
     const baseScale = (Math.min(w, h) / 2) * 0.85;
+
+    // While a stroke is in progress, show only the live ink being traced —
+    // hide the previous reconstruction/trail so it doesn't look like the
+    // drawing is being ignored.
+    if (strokeActive) {
+      renderLiveInk(ctx, baseScale);
+      ctx.restore();
+      return;
+    }
+
     const drawing = state.drawing;
     const hasCoeffs = drawing.coeffs && drawing.coeffs.length > 0;
     const K = Math.max(K_MIN, Math.min(K_MAX, state.K));

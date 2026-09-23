@@ -60,12 +60,19 @@ function normalize(components) {
   return components.map((c) => ({ ...c, amp: c.amp / sum }));
 }
 
+// Below this magnitude, a shape's DC (freq=0) term is treated as noise from
+// sampling/resampling rather than a real offset, and dropped so topK doesn't
+// waste one of the n requested components on a near-zero-amplitude link.
+const DC_EPS = 1e-4;
+
 function fromShape(pathFn, n) {
   const pts = [];
   for (let i = 0; i < SAMPLE_POINTS; i++) pts.push(pathFn(i / SAMPLE_POINTS));
   const z = resampleArcLength(pts, RESAMPLE_N, true);
   const coeffs = dft(z);
-  const top = topK(coeffs, n);
+  const dc = coeffs.find((c) => c.freq === 0);
+  const usable = dc && Math.hypot(dc.c.re, dc.c.im) < DC_EPS ? coeffs.filter((c) => c.freq !== 0) : coeffs;
+  const top = topK(usable, n);
   return normalize(top.map((c) => fromCoeff(c)));
 }
 

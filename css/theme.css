@@ -86,6 +86,13 @@
   --skin: #e8b894;
   --skin-shade: #c98f6b;
   --skin-outline: #7a4a32;
+
+  /* Accessible variant of --primary-color for text/borders on dark surfaces
+     (the raw brand green fails WCAG AA at small text sizes on dark backgrounds). */
+  --primary-accessible: #2bb37a;
+
+  /* Passband/filter shading on the control-tab plots, themed instead of a hardcoded rgba(). */
+  --passband-fill: rgba(43, 179, 122, 0.18);
 }
 
 /* Light theme overrides */
@@ -103,6 +110,8 @@
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
   --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+  --primary-accessible: #00693e;
+  --passband-fill: rgba(0, 105, 62, 0.13);
 }
 
 /* ============ Base ============ */
@@ -199,23 +208,24 @@ body:has(.demo-nav) { padding-top: 70px; }
 /* ============ Hero ============ */
 
 .hero-header {
-  padding: 2.5rem 0 1.75rem;
+  padding: 1.1rem 0 0.85rem;
   text-align: center;
   background: linear-gradient(180deg, var(--surface-color) 0%, var(--bg-color) 100%);
 }
 
 .hero-title {
-  font-size: clamp(1.9rem, 4.5vw, 3rem);
+  font-size: clamp(1.5rem, 3.2vw, 2.15rem);
   font-weight: 800;
-  margin-bottom: 0.75rem;
-  background: var(--gradient-accent);
+  line-height: 1.2;
+  margin-bottom: 0.4rem;
+  background: var(--gradient-primary);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
 .hero-subtitle {
-  font-size: clamp(1rem, 2vw, 1.2rem);
+  font-size: clamp(0.85rem, 1.5vw, 1rem);
   color: var(--text-secondary);
   max-width: 700px;
   margin: 0 auto;
@@ -256,8 +266,8 @@ body:has(.demo-nav) { padding-top: 70px; }
 
 .btn-outline {
   background: transparent;
-  color: var(--primary-color);
-  border: 2px solid var(--primary-color);
+  color: var(--primary-accessible);
+  border: 2px solid var(--primary-accessible);
 }
 .btn-outline:hover { background: var(--primary-color); color: white; }
 
@@ -270,6 +280,8 @@ body:has(.demo-nav) { padding-top: 70px; }
 .btn-icon:hover { color: var(--error-color); background: var(--surface-hover); }
 
 .btn:disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
+
+input:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ============ Cards / panels ============ */
 
@@ -294,7 +306,7 @@ body:has(.demo-nav) { padding-top: 70px; }
 
 .caption {
   font-size: 0.85rem;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   margin-top: var(--spacing-sm);
 }
 
@@ -399,3 +411,15 @@ input[type='checkbox'] { accent-color: var(--primary-color); width: 16px; height
 
 /* KaTeX should inherit surrounding text color */
 .katex { color: inherit; }
+
+/* ============ Accessibility: visible focus ============ */
+
+a:focus-visible,
+button:focus-visible,
+.tab-btn:focus-visible,
+input:focus-visible,
+select:focus-visible,
+canvas:focus-visible {
+  outline: 2px solid var(--secondary-color);
+  outline-offset: 2px;
+}

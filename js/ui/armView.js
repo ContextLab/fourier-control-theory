@@ -2,12 +2,15 @@
 // end-effector trace + fading trail.
 import { setupCanvas, makeTransform, cssVar } from './canvas.js';
 import { jointPositions, invertDrag } from '../core/arm.js';
-import { drawArmSkin } from './armSkin.js';
+import { drawArmSkin, isAnatomical } from './armSkin.js';
+import { MAX_AMP } from '../core/store.js';
 
 const HIT_RADIUS = 12; // px, joint-tip hit test
 const TRAIL_MAX = 90; // recent-tip trail length (frames)
-const FIT_MARGIN = 0.82; // fraction of half-viewport the max reach should fill
-const SCALE_EASE = 0.12; // per-render lerp factor for autofit scale (frozen while dragging)
+const FIT_MARGIN = 0.08; // fraction of each side reserved as margin around the fitted bbox
+const SCALE_EASE = 0.12; // per-render lerp factor for autofit scale/center (frozen while dragging)
+const TIME_JUMP_THRESHOLD = 0.05; // fraction of a period; a bigger circular jump resets the trail
+const THEME_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
 
 /**
  * @param {HTMLCanvasElement} canvas
@@ -28,6 +31,10 @@ export function createArmView(canvas, store, opts = {}) {
 
   const cv = setupCanvas(canvas);
   if (interactive) canvas.style.touchAction = 'none';
+  if (!canvas.hasAttribute('role')) canvas.setAttribute('role', 'img');
+  if (!canvas.hasAttribute('aria-label')) {
+    canvas.setAttribute('aria-label', 'Animated robot-arm / Fourier-epicycle diagram');
+  }
 
   let colors = readColors();
   function readColors() {
@@ -47,12 +54,15 @@ export function createArmView(canvas, store, opts = {}) {
   document.addEventListener('themechange', onThemeChange);
 
   let currentScale = 1;
-  let scaleInitialized = false;
+  let currentCenter = { re: 0, im: 0 };
+  let viewInitialized = false;
   const trail = []; // { re, im } most-recent-last
+  let lastT = null;
 
   // Drag state
   let dragging = null; // { pointerId, k, id }
   let hoverK = -1;
+  let lastPointerLocal = null; // { x, y } in canvas-center-relative local coords, for re-hit-testing on render
 
   function currentComponents(state) {
     return componentsOverride ? componentsOverride() : state.components;
@@ -63,31 +73,133 @@ export function createArmView(canvas, store, opts = {}) {
     return !!state.showCircles;
   }
 
-  function skinModeFor(state) {
-    return !!(opts.skin ?? state.showSkin);
+  function skinModeFor(state, components) {
+    return !!(opts.skin ?? state.showSkin) && isAnatomical(components);
   }
 
-  function fitScale(components) {
-    let reach = 0;
-    for (const c of components) reach += Math.abs(c.amp);
-    if (reach < 1e-6) reach = 1;
-    const half = Math.min(cv.w, cv.h) / 2;
-    return (half * FIT_MARGIN) / reach;
+  function resetTrail() {
+    trail.length = 0;
+  }
+
+  // Track the source of the most recent components change, so autofit can
+  // tell "the user is manipulating the arm" (source 'arm': a joint drag)
+  // apart from "the shape changed underneath them" (preset load, editor
+  // edit, drawing, a spectrum-stem drag). Also resets the fading trail
+  // whenever the change came from outside this view, so it never draws a
+  // straight chord from the old shape's tip to the new one's.
+  let lastComponentsSource = null;
+  const unsubscribeComponents = store.subscribe((state, changedKeys, source) => {
+    lastComponentsSource = source;
+    if (source !== 'arm') resetTrail();
+  }, ['components']);
+
+  /**
+   * Bounding box (world units) of the union of the full-period path and the
+   * current arm pose, always including the origin (base/shoulder).
+   */
+  function computeBBox(components, state, derived) {
+    let minRe = Infinity;
+    let maxRe = -Infinity;
+    let minIm = Infinity;
+    let maxIm = -Infinity;
+    const extend = (re, im) => {
+      if (!Number.isFinite(re) || !Number.isFinite(im)) return;
+      if (re < minRe) minRe = re;
+      if (re > maxRe) maxRe = re;
+      if (im < minIm) minIm = im;
+      if (im > maxIm) maxIm = im;
+    };
+    extend(0, 0);
+    const path = derived && derived.path;
+    if (path && path.length >= 2) {
+      for (let i = 0; i < path.length; i += 2) extend(path[i], path[i + 1]);
+    }
+    const pts = jointPositions(components, state.t, { re: 0, im: 0 });
+    for (const p of pts) extend(p.re, p.im);
+
+    let bboxW = Number.isFinite(minRe) ? maxRe - minRe : 0;
+    let bboxH = Number.isFinite(minIm) ? maxIm - minIm : 0;
+    const cx = Number.isFinite(minRe) ? (minRe + maxRe) / 2 : 0;
+    const cy = Number.isFinite(minIm) ? (minIm + maxIm) / 2 : 0;
+    if (!(bboxW > 1e-6) && !(bboxH > 1e-6)) {
+      bboxW = 1;
+      bboxH = 1;
+    }
+    return { minRe, maxRe, minIm, maxIm, cx, cy, bboxW, bboxH };
+  }
+
+  /** Auto-fit target (scale + center) for a bbox, with an 8%-of-canvas margin. */
+  function fitTargetFromBBox(bbox) {
+    const availW = Math.max(1, cv.w * (1 - 2 * FIT_MARGIN));
+    const availH = Math.max(1, cv.h * (1 - 2 * FIT_MARGIN));
+    const scale = Math.min(availW / Math.max(bbox.bboxW, 1e-6), availH / Math.max(bbox.bboxH, 1e-6));
+    return { scale, center: { re: bbox.cx, im: bbox.cy } };
+  }
+
+  /**
+   * `true` iff `bbox`, drawn with the CURRENT (not target) view, would spill
+   * past the canvas edge (i.e. actually leave the visible canvas) — NOT
+   * merely past the cosmetic margin. A small, in-frame arm-drag nudges the
+   * full-period path's bbox slightly on every edit; re-fitting for that
+   * would make the view visibly drift right as the user releases the
+   * pointer, so only a real "gone off-screen" case should force a re-fit
+   * while the most recent change came from the arm itself.
+   */
+  function overflowsCanvas(bbox) {
+    const tf = makeTransform(currentCenter, currentScale);
+    const halfW = cv.w / 2;
+    const halfH = cv.h / 2;
+    const corners = [
+      { re: bbox.minRe, im: bbox.minIm },
+      { re: bbox.minRe, im: bbox.maxIm },
+      { re: bbox.maxRe, im: bbox.minIm },
+      { re: bbox.maxRe, im: bbox.maxIm },
+    ];
+    for (const c of corners) {
+      const p = tf.toPx(c);
+      if (Math.abs(p.x) > halfW || Math.abs(p.y) > halfH) return true;
+    }
+    return false;
   }
 
   function render(state, derived) {
     const { ctx, w, h } = cv;
     const components = currentComponents(state) || [];
 
-    const target = fitScale(components);
-    if (!scaleInitialized) {
-      currentScale = target;
-      scaleInitialized = true;
+    // Reset the trail on a large time jump (scrub, preset-driven t reset,
+    // etc.) so it never draws a straight chord across the discontinuity.
+    if (lastT != null) {
+      const raw = Math.abs(state.t - lastT);
+      const circular = Math.min(raw, 1 - raw);
+      if (circular > TIME_JUMP_THRESHOLD) resetTrail();
+    }
+    lastT = state.t;
+
+    const bbox = computeBBox(components, state, derived);
+    if (!viewInitialized) {
+      const target = fitTargetFromBBox(bbox);
+      currentScale = target.scale;
+      currentCenter = target.center;
+      viewInitialized = true;
     } else if (!dragging) {
-      currentScale += (target - currentScale) * SCALE_EASE;
+      // Stay put while the user is manipulating the arm (the most recent
+      // components change came from a joint drag): re-fitting on every
+      // frame would make the shoulder/base visibly drift as soon as they
+      // release, even for a small, in-frame adjustment. Only re-fit for a
+      // drag-sourced change if it actually pushed the arm/path out of view;
+      // any other source (preset, editor, draw, spectrum) always re-fits.
+      const shouldRefit = lastComponentsSource !== 'arm' || overflowsCanvas(bbox);
+      if (shouldRefit) {
+        const target = fitTargetFromBBox(bbox);
+        currentScale += (target.scale - currentScale) * SCALE_EASE;
+        currentCenter = {
+          re: currentCenter.re + (target.center.re - currentCenter.re) * SCALE_EASE,
+          im: currentCenter.im + (target.center.im - currentCenter.im) * SCALE_EASE,
+        };
+      }
     }
 
-    const tf = makeTransform({ re: 0, im: 0 }, currentScale);
+    const tf = makeTransform(currentCenter, currentScale);
 
     ctx.save();
     ctx.clearRect(0, 0, w, h);
@@ -101,6 +213,14 @@ export function createArmView(canvas, store, opts = {}) {
       const q = tf.toPx(p);
       return { x: q.x + cv.w / 2, y: q.y + cv.h / 2 };
     });
+
+    // Re-hit-test against the last-known pointer position even if the pointer
+    // itself hasn't moved: the arm animates continuously, so a joint can
+    // slide under (or out from under) a stationary cursor.
+    if (interactive && !dragging && !componentsOverride && lastPointerLocal) {
+      hoverK = hitTestJoint(lastPointerLocal.x, lastPointerLocal.y, state);
+      canvas.style.cursor = hoverK >= 0 ? 'grab' : 'default';
+    }
 
     // Faint full-period path.
     if (derived && derived.path && derived.path.length >= 4) {
@@ -139,7 +259,7 @@ export function createArmView(canvas, store, opts = {}) {
     // Anatomical skin (bones = components; skin deforms with the bone chain).
     // Drawn before the bone links so the bones can be layered thin/translucent
     // on top of it, x-ray style.
-    const skinMode = skinModeFor(state);
+    const skinMode = skinModeFor(state, components);
     if (skinMode && components.length) {
       const jointsPx = pts.map((p) => tf.toPx(p));
       const selectedIndex = components.findIndex((c) => c.id === state.selectedId);
@@ -228,7 +348,7 @@ export function createArmView(canvas, store, opts = {}) {
       ctx.stroke();
       if (numberJoints) {
         ctx.fillStyle = colors.textSecondary;
-        ctx.font = '11px sans-serif';
+        ctx.font = `11px ${THEME_FONT}`;
         ctx.textAlign = 'center';
         ctx.fillText(String(i), p.x, p.y - 10);
       }
@@ -246,7 +366,7 @@ export function createArmView(canvas, store, opts = {}) {
 
   function hitTestJoint(px, py, state) {
     const components = currentComponents(state) || [];
-    const tf = makeTransform({ re: 0, im: 0 }, currentScale);
+    const tf = makeTransform(currentCenter, currentScale);
     const pts = jointPositions(components, state.t, { re: 0, im: 0 });
     let best = -1;
     let bestDist = HIT_RADIUS;
@@ -261,9 +381,18 @@ export function createArmView(canvas, store, opts = {}) {
     return best;
   }
 
+  /** Clamp a local (canvas-center-relative) point to stay within the visible canvas. */
+  function clampToCanvas(x, y) {
+    return {
+      x: Math.max(-cv.w / 2, Math.min(cv.w / 2, x)),
+      y: Math.max(-cv.h / 2, Math.min(cv.h / 2, y)),
+    };
+  }
+
   function onPointerMoveHover(evt) {
     if (!interactive || dragging || componentsOverride) return;
     const { x, y } = localXY(evt);
+    lastPointerLocal = { x, y };
     const state = store.get();
     hoverK = hitTestJoint(x, y, state);
     canvas.style.cursor = hoverK >= 0 ? 'grab' : 'default';
@@ -272,6 +401,7 @@ export function createArmView(canvas, store, opts = {}) {
   function onPointerDown(evt) {
     if (!interactive || componentsOverride) return;
     const { x, y } = localXY(evt);
+    lastPointerLocal = { x, y };
     const state = store.get();
     const k = hitTestJoint(x, y, state);
     if (k < 0) return;
@@ -279,6 +409,7 @@ export function createArmView(canvas, store, opts = {}) {
     const comp = components[k];
     store.set({ selectedId: comp.id }, 'arm');
     dragging = { pointerId: evt.pointerId, k, id: comp.id };
+    store.set({ dragging: true }, 'arm');
     canvas.setPointerCapture(evt.pointerId);
     canvas.style.cursor = 'grabbing';
     evt.preventDefault();
@@ -286,19 +417,22 @@ export function createArmView(canvas, store, opts = {}) {
 
   function onPointerMove(evt) {
     if (dragging && dragging.pointerId === evt.pointerId) {
-      const { x, y } = localXY(evt);
+      const raw = localXY(evt);
+      const { x, y } = clampToCanvas(raw.x, raw.y);
+      lastPointerLocal = { x, y };
       const state = store.get();
       const components = currentComponents(state);
-      const tf = makeTransform({ re: 0, im: 0 }, currentScale);
+      const tf = makeTransform(currentCenter, currentScale);
       const worldP = tf.toWorld(x, y);
       const result = invertDrag(components, dragging.k, worldP, state.t, { re: 0, im: 0 });
-      if (skinModeFor(state) && !evt.shiftKey) {
+      const amp = Math.min(MAX_AMP, result.amp);
+      if (skinModeFor(state, components) && !evt.shiftKey) {
         // Anatomical mode: a plain drag rotates the bone only (keeps its
         // length/amp so the arm doesn't stretch); shift+drag allows full
         // amp+phase re-solve like the non-skin arm.
         store.updateComponent(dragging.id, { phase: result.phase }, 'arm');
       } else {
-        store.updateComponent(dragging.id, { amp: result.amp, phase: result.phase }, 'arm');
+        store.updateComponent(dragging.id, { amp, phase: result.phase }, 'arm');
       }
       evt.preventDefault();
       return;
@@ -310,6 +444,7 @@ export function createArmView(canvas, store, opts = {}) {
     if (dragging && dragging.pointerId === evt.pointerId) {
       try { canvas.releasePointerCapture(evt.pointerId); } catch { /* noop */ }
       dragging = null;
+      store.set({ dragging: false }, 'arm');
       canvas.style.cursor = hoverK >= 0 ? 'grab' : 'default';
     }
   }
@@ -322,6 +457,7 @@ export function createArmView(canvas, store, opts = {}) {
     canvas.addEventListener('pointerleave', () => {
       if (!dragging) {
         hoverK = -1;
+        lastPointerLocal = null;
         canvas.style.cursor = 'default';
       }
     });
@@ -333,6 +469,7 @@ export function createArmView(canvas, store, opts = {}) {
 
   function destroy() {
     document.removeEventListener('themechange', onThemeChange);
+    unsubscribeComponents();
     if (interactive) {
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointermove', onPointerMove);

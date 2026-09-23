@@ -5,6 +5,13 @@
  * shoulder -> upper arm -> forearm -> hand (with thumb) -> finger phalanges
  * -> fingertip, with any additional bones drawn as tapering tentacle-like
  * continuations. Pure Canvas 2D vector paths; no images.
+ *
+ * All pieces (shoulder cap, main limb tube, thumb) are built as `Path2D`
+ * objects and rendered as a single opaque union: every outline is stroked
+ * FIRST (at double the visible width), then every piece is filled solid
+ * on top. Because the fill exactly covers the inner half of its own stroke,
+ * only the half that isn't covered by *some* piece's fill survives — i.e.
+ * the outline of the boolean union, with no seams where pieces overlap.
  * @module ui/armSkin
  */
 
@@ -17,6 +24,7 @@ const DEFAULT_COLORS = {
 
 const SAMPLES_PER_BONE = 8;
 const BLEND = 0.22; // fraction of each bone's own parameter range blended toward the joint value
+const MIN_HALF_PX = 8; // floor on every drawn half-width, in the same px space as joint handles
 
 // Per-bone-type half-width profiles: [u, fraction] control points, u in [0,1]
 // along the bone from its proximal (near-body) end to its distal (far) end.
@@ -26,11 +34,24 @@ const BLEND = 0.22; // fraction of each bone's own parameter range blended towar
 // short-and-wide; limbs and fingers are proportionally long-and-narrow.
 const PROPORTIONS = {
   upperArm: 0.3,
-  forearm: 0.26,
-  hand: 0.45,
-  phalanx1: 0.32,
-  phalanx2: 0.3,
+  forearm: 0.27,
+  hand: 0.62,
+  phalanx1: 0.36,
+  phalanx2: 0.34,
   tentacle: 0.3,
+};
+
+// Fraction of the whole-chain average bone length ("unit") below which a
+// bone's effective length is floored when sizing its width. Hands/fingers
+// are often much shorter than the upper arm/forearm; without a generous
+// floor they'd read as thin stubs instead of a hand + fingers.
+const LENGTH_FLOOR = {
+  upperArm: 0.15,
+  forearm: 0.15,
+  hand: 0.35,
+  phalanx1: 0.3,
+  phalanx2: 0.3,
+  tentacle: 0.2,
 };
 
 const PROFILES = {
@@ -46,20 +67,24 @@ const PROFILES = {
     [0.3, 0.62],
     [1, 0.32],
   ],
+  // Palm wider than the wrist: narrower at u=0 (wrist), widest across the
+  // palm, tapering slightly toward the knuckles (u=1) where fingers attach.
   hand: [
-    [0, 0.5],
-    [0.25, 0.62],
-    [0.6, 0.58],
-    [1, 0.5],
+    [0, 0.42],
+    [0.32, 0.88],
+    [0.68, 0.82],
+    [1, 0.58],
   ],
   phalanx1: [
     [0, 0.46],
-    [1, 0.36],
+    [1, 0.38],
   ],
+  // Plumper, rounded fingertip (wide enough to read as a tip + nail, and to
+  // fully contain the fingertip's draggable joint handle).
   phalanx2: [
-    [0, 0.38],
-    [0.7, 0.28],
-    [1, 0.14],
+    [0, 0.4],
+    [0.7, 0.34],
+    [1, 0.26],
   ],
   tentacle: [
     [0, 0.32],
@@ -83,6 +108,9 @@ function lerp(a, b, u) {
 }
 function vlen(a) {
   return Math.hypot(a.x, a.y);
+}
+function dot(a, b) {
+  return a.x * b.x + a.y * b.y;
 }
 function safeNorm(a, fallback) {
   const l = vlen(a);
@@ -121,30 +149,30 @@ function profileAt(points, u) {
 }
 
 /** Draws a smooth curve through `pts` (quadratic-curve-through-midpoints), continuing an open path. */
-function curveThrough(ctx, pts) {
+function curveThrough(target, pts) {
   if (pts.length === 0) return;
-  ctx.lineTo(pts[0].x, pts[0].y);
+  target.lineTo(pts[0].x, pts[0].y);
   for (let i = 1; i < pts.length - 1; i++) {
     const mx = (pts[i].x + pts[i + 1].x) / 2;
     const my = (pts[i].y + pts[i + 1].y) / 2;
-    ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+    target.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
   }
   if (pts.length > 1) {
     const last = pts[pts.length - 1];
-    ctx.lineTo(last.x, last.y);
+    target.lineTo(last.x, last.y);
   }
 }
 
 /** Draws a round cap (semicircle) at `center`, bulging outward in the +dir direction. */
-function drawRoundCap(ctx, center, normal, dir, radius) {
+function drawRoundCap(target, center, normal, dir, radius) {
   if (radius <= 0) return;
   const a0 = Math.atan2(normal.y, normal.x);
   const a1 = Math.atan2(-normal.y, -normal.x);
   const midAngle = a0 + Math.PI / 2;
   const mid = { x: Math.cos(midAngle), y: Math.sin(midAngle) };
-  const dot = mid.x * dir.x + mid.y * dir.y;
-  const anticlockwise = dot < 0;
-  ctx.arc(center.x, center.y, radius, a0, a1, anticlockwise);
+  const d = mid.x * dir.x + mid.y * dir.y;
+  const anticlockwise = d < 0;
+  target.arc(center.x, center.y, radius, a0, a1, anticlockwise);
 }
 
 function boneTypeFor(i) {
@@ -174,16 +202,29 @@ function buildBoneGeom(jointsPx, unit) {
     const nrm = normalOf(dir);
     const type = boneTypeFor(i);
     // Width tracks this bone's OWN length (so short finger segments read as
-    // narrow, not as fat as the upper arm) — a global-size floor/ceiling
-    // (tied to the whole chain's average bone length) only rescues bones
-    // that have collapsed to near-zero length in the current pose, so they
-    // don't vanish into needles.
-    const effectiveLen = clamp(length, unit * 0.15, unit * 2.2);
+    // narrow, not as fat as the upper arm) — but with a per-type floor tied
+    // to the whole chain's average bone length, so a hand/finger that's
+    // genuinely much shorter than the limbs (a common Fourier-preset shape)
+    // still reads as a hand and fingers instead of a stub.
+    const floorFrac = LENGTH_FLOOR[type] ?? 0.15;
+    const effectiveLen = clamp(length, unit * floorFrac, unit * 2.2);
     let widthScale = effectiveLen * PROPORTIONS[type];
     if (i >= 5) widthScale *= Math.pow(0.82, i - 4);
     bones.push({ p0, p1, dir, nrm, length, type, profile: PROFILES[type], widthScale });
   }
   return bones;
+}
+
+/**
+ * `true` iff every component carries a `label` string — i.e. this is the
+ * anatomical human-arm preset (as opposed to an arbitrary Fourier chain),
+ * the only case in which the skin should be drawn.
+ * @param {Array<object>} components
+ * @returns {boolean}
+ */
+export function isAnatomical(components) {
+  return Array.isArray(components) && components.length > 0
+    && components.every((c) => c && typeof c.label === 'string');
 }
 
 /**
@@ -206,14 +247,17 @@ export function drawArmSkin(ctx, jointsPx, opts = {}) {
   if (!(unit > 1e-6)) unit = opts.scalePx ? opts.scalePx * 0.5 : 40;
   unit = clamp(unit, 8, 400);
 
-  const MIN_HALF = Math.max(1.5, unit * 0.05);
-  const MAX_HALF = unit * 1.1;
+  const MIN_HALF = Math.max(1.5, unit * 0.05, MIN_HALF_PX);
+  const MAX_HALF = Math.max(unit * 1.1, MIN_HALF);
 
   const bones = buildBoneGeom(jointsPx, unit);
 
-  // Per-joint bisector normals and blended widths (j = 0..n).
+  // Per-joint bisector normals and blended widths (j = 0..n), plus a
+  // "foldedness" factor (0 = straight, 1 = folded back on itself) used to
+  // soften the visual join at extreme flexion (skin only; kinematics untouched).
   const jointNormal = new Array(n + 1);
   const jointWidth = new Array(n + 1);
+  const jointFold = new Array(n + 1).fill(0);
   jointNormal[0] = bones[0].nrm;
   jointWidth[0] = clamp(bones[0].widthScale * profileAt(bones[0].profile, 0), MIN_HALF, MAX_HALF);
   jointNormal[n] = bones[n - 1].nrm;
@@ -224,6 +268,8 @@ export function drawArmSkin(ctx, jointsPx, opts = {}) {
     const wPrevEnd = bones[j - 1].widthScale * profileAt(bones[j - 1].profile, 1);
     const wNextStart = bones[j].widthScale * profileAt(bones[j].profile, 0);
     jointWidth[j] = clamp((wPrevEnd + wNextStart) / 2, MIN_HALF, MAX_HALF);
+    const cosAngle = clamp(dot(bones[j - 1].dir, bones[j].dir), -1, 1);
+    jointFold[j] = clamp((1 - cosAngle) / 2, 0, 1); // 0 straight, 1 folded back
   }
 
   // Sample left/right offset points along the whole chain.
@@ -262,70 +308,112 @@ export function drawArmSkin(ctx, jointsPx, opts = {}) {
   const backNormal = { x: -shoulderNormal.x, y: -shoulderNormal.y };
   const rightRev = rightPts.slice().reverse();
 
-  /** Traces the full tube outline: left side base->tip, round tip cap, right side tip->base, round base cap. */
-  function traceTube() {
-    ctx.moveTo(leftPts[0].x, leftPts[0].y);
-    curveThrough(ctx, leftPts.slice(1));
-    drawRoundCap(ctx, tipPoint, tipNormal, tipDir, tipWidth);
-    curveThrough(ctx, rightRev);
-    drawRoundCap(ctx, shoulderPoint, backNormal, backDir, shoulderWidth);
-  }
+  // -- Build every piece as a Path2D (so the exact same geometry is used for
+  // both the stroke pass and the fill pass — no seam mismatch). -----------
 
-  ctx.save();
-  if (xray) ctx.globalAlpha = 0.55;
+  const tubePath = new Path2D();
+  tubePath.moveTo(leftPts[0].x, leftPts[0].y);
+  curveThrough(tubePath, leftPts.slice(1));
+  drawRoundCap(tubePath, tipPoint, tipNormal, tipDir, tipWidth);
+  curveThrough(tubePath, rightRev);
+  drawRoundCap(tubePath, shoulderPoint, backNormal, backDir, shoulderWidth);
+  tubePath.closePath();
 
-  // Shoulder / torso stub, drawn first so the tube overlaps it cleanly.
+  // Shoulder / torso cap: a rounded deltoid stub the upper-arm tube plugs into.
   const stubCenter = add(shoulderPoint, scale(bones[0].dir, -shoulderWidth * 0.9));
   const stubAngle = Math.atan2(bones[0].dir.y, bones[0].dir.x);
-  ctx.beginPath();
-  ctx.ellipse(stubCenter.x, stubCenter.y, shoulderWidth * 1.1, shoulderWidth * 1.4, stubAngle + Math.PI / 2, 0, Math.PI * 2);
+  const stubPath = new Path2D();
+  stubPath.ellipse(stubCenter.x, stubCenter.y, shoulderWidth * 1.15, shoulderWidth * 1.5, stubAngle + Math.PI / 2, 0, Math.PI * 2);
+
+  // Joint discs: fill over the tube's own seams/pinches at each interior
+  // joint. Radius grows with foldedness so a >150° elbow/knuckle fold is
+  // visually smoothed instead of showing a self-intersecting notch.
+  const jointCapPaths = [];
+  for (let j = 1; j < n; j++) {
+    const p = jointsPx[j];
+    const r = jointWidth[j] * (1.05 + jointFold[j] * 1.1);
+    const jp = new Path2D();
+    jp.arc(p.x, p.y, r, 0, Math.PI * 2);
+    jointCapPaths.push(jp);
+  }
+
+  // Thumb: rigid child of the hand bone (index 2), angled off to one side.
+  let thumbPath = null;
+  let thumbKnucklePath = null;
+  let thumbBase = null;
+  let thumbBaseW = 0;
+  if (n >= 3) {
+    const hand = bones[2];
+    thumbBase = lerp(hand.p0, hand.p1, 0.22);
+    const thumbAngle = -1.0; // fixed offset relative to hand bone orientation
+    const thumbDir = rotate(hand.dir, thumbAngle);
+    const thumbLen = hand.length * 0.55;
+    const thumbTip = add(thumbBase, scale(thumbDir, thumbLen));
+    const thumbNormal = normalOf(thumbDir);
+    const thumbProfile = PROFILES.phalanx1;
+    const thumbWidthScale = hand.widthScale * 0.85;
+    const tLeft = [];
+    const tRight = [];
+    for (let s = 0; s <= SAMPLES_PER_BONE; s++) {
+      const u = s / SAMPLES_PER_BONE;
+      const w = clamp(thumbWidthScale * profileAt(thumbProfile, u), MIN_HALF * 0.85, MAX_HALF);
+      const pt = lerp(thumbBase, thumbTip, u);
+      tLeft.push(add(pt, scale(thumbNormal, w)));
+      tRight.push(add(pt, scale(thumbNormal, -w)));
+    }
+    thumbBaseW = clamp(thumbWidthScale * profileAt(thumbProfile, 0), MIN_HALF * 0.85, MAX_HALF);
+    const thumbTipW = clamp(thumbWidthScale * profileAt(thumbProfile, 1), MIN_HALF * 0.85, MAX_HALF);
+    thumbKnucklePath = new Path2D();
+    thumbKnucklePath.arc(thumbBase.x, thumbBase.y, thumbBaseW * 1.15, 0, Math.PI * 2);
+    thumbPath = new Path2D();
+    thumbPath.moveTo(tLeft[0].x, tLeft[0].y);
+    curveThrough(thumbPath, tLeft.slice(1));
+    drawRoundCap(thumbPath, thumbTip, thumbNormal, thumbDir, thumbTipW);
+    curveThrough(thumbPath, tRight.slice().reverse());
+    thumbPath.closePath();
+  }
+
+  // The skin itself is always drawn fully opaque (that's the whole point of
+  // the union-outline trick above — no seams). `xray` only controls whether
+  // the thin bone struts are drawn translucently on TOP of it, afterward.
+  ctx.save();
+  ctx.lineJoin = 'round';
+
+  // -- Pass 1: stroke every outline FIRST, at double the visible width. ----
+  // The fill pass (below) covers the inner half of each stroke; only the
+  // half not covered by any piece's fill survives, which is exactly the
+  // outline of the boolean union — no seams where pieces overlap.
+  const outlineW = Math.max(1, unit * 0.04);
+  ctx.strokeStyle = colors.outline;
+  ctx.lineWidth = outlineW * 2;
+  ctx.stroke(stubPath);
+  ctx.stroke(tubePath);
+  if (thumbPath) ctx.stroke(thumbPath);
+
+  // -- Pass 2: fill every piece solid, opaque, on top. ---------------------
   ctx.fillStyle = colors.skin;
-  ctx.fill();
+  ctx.fill(stubPath, 'nonzero');
+  ctx.fill(tubePath, 'nonzero');
+  for (const jp of jointCapPaths) ctx.fill(jp);
+  if (thumbKnucklePath) ctx.fill(thumbKnucklePath);
+  if (thumbPath) ctx.fill(thumbPath);
 
-  // Main continuous tube: left side base->tip, round tip cap, right side tip->base, round base cap.
-  ctx.beginPath();
-  traceTube();
-  ctx.closePath();
-
-  const grad = ctx.createLinearGradient(shoulderPoint.x, shoulderPoint.y, tipPoint.x, tipPoint.y);
-  grad.addColorStop(0, colors.skin);
-  grad.addColorStop(1, colors.skin);
-  ctx.fillStyle = grad;
-  ctx.fill();
+  // -- Decorative overlays, drawn on top of the finished opaque union. -----
 
   // Subtle one-sided shading along the "right" (far) side.
   ctx.beginPath();
   ctx.moveTo(rightPts[0].x, rightPts[0].y);
   curveThrough(ctx, rightPts.slice(1));
   ctx.strokeStyle = colors.skinShade;
-  ctx.globalAlpha = (xray ? 0.55 : 1) * 0.35;
+  ctx.globalAlpha = 0.35;
   ctx.lineWidth = Math.max(1, unit * 0.06);
   ctx.stroke();
-  ctx.globalAlpha = xray ? 0.55 : 1;
+  ctx.globalAlpha = 1;
 
-  // Outline.
-  ctx.beginPath();
-  traceTube();
-  ctx.closePath();
-  ctx.strokeStyle = colors.outline;
-  ctx.lineWidth = Math.max(1, unit * 0.04);
-  ctx.stroke();
-
-  // Joint caps (elbow/wrist/knuckles) hide any seam between adjacent bone shapes.
+  // Small crease line on the flexion side of each joint.
   for (let j = 1; j < n; j++) {
     const p = jointsPx[j];
-    const r = jointWidth[j] * 1.05;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = colors.skin;
-    ctx.fill();
-    ctx.lineWidth = Math.max(1, unit * 0.03);
-    ctx.strokeStyle = colors.outline;
-    ctx.globalAlpha = (xray ? 0.55 : 1) * 0.6;
-    ctx.stroke();
-    ctx.globalAlpha = xray ? 0.55 : 1;
-
-    // Small crease line on the flexion side.
+    const r = jointWidth[j] * (1.05 + jointFold[j] * 1.1);
     const cross = bones[j - 1].dir.x * bones[j].dir.y - bones[j - 1].dir.y * bones[j].dir.x;
     const side = cross >= 0 ? -1 : 1;
     const creaseCenter = add(p, scale(jointNormal[j], r * 0.55 * side));
@@ -334,69 +422,32 @@ export function drawArmSkin(ctx, jointsPx, opts = {}) {
     ctx.arc(creaseCenter.x, creaseCenter.y, r * 0.4, creaseAngle - 0.9, creaseAngle + 0.9);
     ctx.strokeStyle = colors.skinShade;
     ctx.lineWidth = Math.max(1, unit * 0.025);
-    ctx.globalAlpha = (xray ? 0.55 : 1) * 0.5;
+    ctx.globalAlpha = 0.5;
     ctx.stroke();
-    ctx.globalAlpha = xray ? 0.55 : 1;
-  }
-
-  // Thumb: rigid child of the hand bone (index 2), angled off to one side.
-  if (n >= 3) {
-    const hand = bones[2];
-    const thumbBase = lerp(hand.p0, hand.p1, 0.22);
-    const thumbAngle = -1.0; // fixed offset relative to hand bone orientation
-    const thumbDir = rotate(hand.dir, thumbAngle);
-    const thumbLen = hand.length * 0.55;
-    const thumbTip = add(thumbBase, scale(thumbDir, thumbLen));
-    const thumbNormal = normalOf(thumbDir);
-    const thumbProfile = PROFILES.phalanx1;
-    const thumbWidthScale = hand.widthScale * 0.8;
-    const tLeft = [];
-    const tRight = [];
-    for (let s = 0; s <= SAMPLES_PER_BONE; s++) {
-      const u = s / SAMPLES_PER_BONE;
-      const w = clamp(thumbWidthScale * profileAt(thumbProfile, u), MIN_HALF * 0.7, MAX_HALF);
-      const pt = lerp(thumbBase, thumbTip, u);
-      tLeft.push(add(pt, scale(thumbNormal, w)));
-      tRight.push(add(pt, scale(thumbNormal, -w)));
-    }
-    const thumbBaseW = clamp(thumbWidthScale * profileAt(thumbProfile, 0), MIN_HALF * 0.7, MAX_HALF);
-    const thumbTipW = clamp(thumbWidthScale * profileAt(thumbProfile, 1), MIN_HALF * 0.7, MAX_HALF);
-    ctx.beginPath();
-    ctx.arc(thumbBase.x, thumbBase.y, thumbBaseW * 1.1, 0, Math.PI * 2);
-    ctx.fillStyle = colors.skin;
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(tLeft[0].x, tLeft[0].y);
-    curveThrough(ctx, tLeft.slice(1));
-    drawRoundCap(ctx, thumbTip, thumbNormal, thumbDir, thumbTipW);
-    curveThrough(ctx, tRight.slice().reverse());
-    ctx.closePath();
-    ctx.fillStyle = colors.skin;
-    ctx.fill();
-    ctx.lineWidth = Math.max(1, unit * 0.03);
-    ctx.strokeStyle = colors.outline;
-    ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 
   // Fingernail on the very last (tip) segment.
   if (n >= 1) {
     const lastBone = bones[n - 1];
-    const nailCenter = add(lerp(lastBone.p0, lastBone.p1, 0.8), scale(tipNormal, tipWidth * 0.35));
-    const nailR = Math.max(1, tipWidth * 0.45);
+    const nailCenter = add(lerp(lastBone.p0, lastBone.p1, 0.78), scale(tipNormal, tipWidth * 0.32));
+    const nailR = Math.max(1.5, tipWidth * 0.42);
     ctx.beginPath();
-    ctx.ellipse(nailCenter.x, nailCenter.y, nailR * 0.9, nailR * 0.55, Math.atan2(lastBone.dir.y, lastBone.dir.x), 0, Math.PI * 2);
+    ctx.ellipse(nailCenter.x, nailCenter.y, nailR * 0.85, nailR * 0.55, Math.atan2(lastBone.dir.y, lastBone.dir.x), 0, Math.PI * 2);
     ctx.strokeStyle = colors.outline;
     ctx.lineWidth = Math.max(0.75, unit * 0.02);
-    ctx.globalAlpha = (xray ? 0.55 : 1) * 0.7;
+    ctx.globalAlpha = 0.7;
     ctx.stroke();
-    ctx.globalAlpha = xray ? 0.55 : 1;
+    ctx.globalAlpha = 1;
   }
 
   ctx.restore();
 
-  // X-ray: show the underlying bone struts on top of the translucent skin.
+  // X-ray: show the underlying bone struts, thin and translucent, on top of
+  // the now fully-opaque skin.
   if (xray) {
     ctx.save();
+    ctx.globalAlpha = 0.55;
     ctx.strokeStyle = colors.bone;
     ctx.lineWidth = Math.max(1, unit * 0.05);
     ctx.lineCap = 'round';

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createStore } from '../../js/core/store.js';
+import { createStore, sanitizeComponent, MAX_FREQ, MAX_AMP, PALETTE } from '../../js/core/store.js';
 
 test('createStore starts with the documented default shape', () => {
   const store = createStore();
@@ -199,4 +199,74 @@ test('duplicate ids in a supplied list are de-duplicated', () => {
   const ids = store.get().components.map((c) => c.id);
   assert.equal(ids[0], 4);
   assert.notEqual(ids[1], 4);
+});
+
+test('MAX_FREQ and MAX_AMP and PALETTE are exported', () => {
+  assert.equal(MAX_FREQ, 64);
+  assert.equal(MAX_AMP, 5);
+  assert.ok(Array.isArray(PALETTE));
+  assert.ok(PALETTE.length > 0);
+});
+
+test('sanitizeComponent rounds freq and clamps it to [-MAX_FREQ, MAX_FREQ]', () => {
+  assert.equal(sanitizeComponent({ freq: 2.6, amp: 0, phase: 0 }).freq, 3);
+  assert.equal(sanitizeComponent({ freq: -0.6, amp: 0, phase: 0 }).freq, -1);
+  assert.equal(sanitizeComponent({ freq: 1e6, amp: 0, phase: 0 }).freq, MAX_FREQ);
+  assert.equal(sanitizeComponent({ freq: -1e6, amp: 0, phase: 0 }).freq, -MAX_FREQ);
+  assert.equal(sanitizeComponent({ freq: Infinity, amp: 0, phase: 0 }).freq, MAX_FREQ);
+  assert.equal(sanitizeComponent({ freq: -Infinity, amp: 0, phase: 0 }).freq, -MAX_FREQ);
+  assert.equal(sanitizeComponent({ freq: NaN, amp: 0, phase: 0 }).freq, 0);
+});
+
+test('sanitizeComponent clamps amp to [0, MAX_AMP] and maps NaN to 0', () => {
+  assert.equal(sanitizeComponent({ freq: 0, amp: -0.5, phase: 0 }).amp, 0);
+  assert.equal(sanitizeComponent({ freq: 0, amp: 370, phase: 0 }).amp, MAX_AMP);
+  assert.equal(sanitizeComponent({ freq: 0, amp: NaN, phase: 0 }).amp, 0);
+  assert.equal(sanitizeComponent({ freq: 0, amp: Infinity, phase: 0 }).amp, MAX_AMP);
+  assert.equal(sanitizeComponent({ freq: 0, amp: 2, phase: 0 }).amp, 2);
+});
+
+test('sanitizeComponent wraps phase to (-pi, pi] and maps NaN to 0', () => {
+  close(sanitizeComponent({ freq: 0, amp: 0, phase: Math.PI }).phase, Math.PI);
+  close(sanitizeComponent({ freq: 0, amp: 0, phase: -Math.PI }).phase, Math.PI);
+  close(sanitizeComponent({ freq: 0, amp: 0, phase: 4 * Math.PI }).phase, 0); // 720 deg
+  close(sanitizeComponent({ freq: 0, amp: 0, phase: 3 * Math.PI }).phase, Math.PI);
+  assert.equal(sanitizeComponent({ freq: 0, amp: 0, phase: NaN }).phase, 0);
+  assert.equal(sanitizeComponent({ freq: 0, amp: 0, phase: Infinity }).phase, 0);
+  assert.equal(sanitizeComponent({ freq: 0, amp: 0, phase: -Infinity }).phase, 0);
+
+  function close(a, b, eps = 1e-9) {
+    assert.ok(Math.abs(a - b) < eps, `expected ${a} ~= ${b}`);
+  }
+});
+
+test('sanitizeComponent preserves non-numeric fields like id, color, label', () => {
+  const c = sanitizeComponent({ id: 7, freq: 1, amp: 1, phase: 0, color: '#abc', label: 'Upper arm' });
+  assert.equal(c.id, 7);
+  assert.equal(c.color, '#abc');
+  assert.equal(c.label, 'Upper arm');
+});
+
+test('addComponent, updateComponent, setComponents, and set({components}) all sanitize', () => {
+  const store = createStore();
+
+  const id = store.addComponent({ freq: 2.6, amp: 370, phase: 4 * Math.PI });
+  const added = store.get().components.find((c) => c.id === id);
+  assert.equal(added.freq, 3);
+  assert.equal(added.amp, MAX_AMP);
+  assert.ok(Math.abs(added.phase) < 1e-9);
+
+  store.updateComponent(id, { amp: -5, freq: 1e6 });
+  const updated = store.get().components.find((c) => c.id === id);
+  assert.equal(updated.amp, 0);
+  assert.equal(updated.freq, MAX_FREQ);
+
+  store.setComponents([{ freq: -1e6, amp: NaN, phase: NaN }]);
+  assert.equal(store.get().components[0].freq, -MAX_FREQ);
+  assert.equal(store.get().components[0].amp, 0);
+  assert.equal(store.get().components[0].phase, 0);
+
+  store.set({ components: [{ freq: 100, amp: 8, phase: 0 }] });
+  assert.equal(store.get().components[0].freq, MAX_FREQ);
+  assert.equal(store.get().components[0].amp, MAX_AMP);
 });

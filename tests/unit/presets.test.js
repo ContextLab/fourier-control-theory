@@ -57,3 +57,16 @@ test('preset(name, n) respects the component-count cap for shape-derived presets
   assert.ok(many.length <= 40);
   assert.equal(few.length, 3);
 });
+
+for (const name of ['square', 'sawtooth', 'star']) {
+  test(`preset('${name}', n) drops the near-zero DC term instead of wasting a slot on it`, () => {
+    const n = 5;
+    const components = preset(name, n);
+    // All n requested slots should go to real (non-DC) links, not a wasted
+    // zero-amplitude freq=0 term.
+    assert.equal(components.length, n);
+    for (const c of components) {
+      assert.notEqual(c.freq, 0);
+    }
+  });
+}

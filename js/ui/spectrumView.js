@@ -3,6 +3,7 @@
 // Delete/Backspace to remove, shift-drop to merge duplicate frequencies.
 import { setupCanvas, cssVar } from './canvas.js';
 import { add, abs, arg, fromPolar } from '../core/complex.js';
+import { MAX_FREQ, MAX_AMP } from '../core/store.js';
 
 const HEAD_HIT = 10; // px
 const STEM_HIT = 6; // px, horizontal tolerance
@@ -11,6 +12,23 @@ const RING_HIT = 8; // px tolerance around the ring handle dot
 const MARGIN = { left: 44, right: 18, top: 16, bottom: 26 };
 const FREQ_SNAP_MS = 140; // visual easing duration for horizontal snap
 const TWO_PI = Math.PI * 2;
+const MAX_LABELS = 12; // hard cap on ticks/labels drawn, regardless of F
+const LABEL_STEPS = [1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000];
+// Small inline rotate-ish cursor (curved arrow) for the phase ring handle;
+// 'grab' fallback after the comma covers browsers that reject the data URI.
+const ROTATE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">'
+  + '<path d="M4 10a6 6 0 1 0 2-4.5" fill="none" stroke="black" stroke-width="1.6"/>'
+  + '<path d="M4.5 3.5l-0.7 3.4 3.4 0.2" fill="none" stroke="black" stroke-width="1.6"/>'
+  + '</svg>',
+)}") 10 10, grab`;
+
+function themeFont(px) {
+  const family = (typeof document !== 'undefined'
+    && document.body
+    && getComputedStyle(document.body).fontFamily) || 'sans-serif';
+  return `${px}px ${family}`;
+}
 
 function wrapAngle(a) {
   let x = a % TWO_PI;
@@ -28,11 +46,23 @@ export function createSpectrumView(canvas, store, opts = {}) {
   const { interactive = true } = opts;
 
   const cv = setupCanvas(canvas);
+  canvas.setAttribute('role', interactive ? 'application' : 'img');
+  canvas.setAttribute(
+    'aria-label',
+    interactive
+      ? 'Fourier spectrum editor: stem plot of frequency components. Drag a stem to change '
+        + 'amplitude and frequency, alt-drag or use the phase ring to change phase, '
+        + 'double-click to add a component, Delete to remove the selected one.'
+      : 'Fourier spectrum: stem plot of frequency components.',
+  );
   if (interactive) {
     canvas.tabIndex = 0;
     canvas.style.touchAction = 'none';
     canvas.style.outline = 'none';
   }
+
+  let hasInteracted = false;
+  function markInteracted() { hasInteracted = true; }
 
   let colors = readColors();
   function readColors() {
@@ -83,12 +113,12 @@ export function createSpectrumView(canvas, store, opts = {}) {
       currentF = targetF;
       currentYMax = targetYMax;
       axisInitialized = true;
-    } else {
-      // x-axis frequency extent eases smoothly (never frozen).
+    } else if (!dragging) {
+      // Both axes are frozen while a drag is in progress: an eased x-range
+      // that grows as the dragged freq grows would let the pointer keep
+      // "outrunning" the axis and the frequency runs away without bound.
       currentF += (targetF - currentF) * AXIS_EASE;
-      // y-axis max is frozen while any drag is in progress so the plot
-      // doesn't rescale under the pointer mid-drag.
-      if (!dragging) currentYMax += (targetYMax - currentYMax) * AXIS_EASE;
+      currentYMax += (targetYMax - currentYMax) * AXIS_EASE;
     }
 
     const plotX = MARGIN.left;
@@ -152,13 +182,24 @@ export function createSpectrumView(canvas, store, opts = {}) {
     ctx.stroke();
     ctx.globalAlpha = 1;
 
-    // Integer frequency ticks.
-    const tickCount = 2 * L.F + 1;
-    const labelStep = Math.max(1, Math.ceil(tickCount / 20));
+    // Integer frequency ticks: only every `labelStep`-th integer gets a tick
+    // + label, chosen from a "nice number" sequence so labels never collide,
+    // and the loop is capped at MAX_LABELS iterations regardless of F.
+    const fLo = Math.ceil(-L.F);
+    const fHi = Math.floor(L.F);
+    const span = Math.max(1, fHi - fLo);
+    let labelStep = LABEL_STEPS[LABEL_STEPS.length - 1];
+    for (const s of LABEL_STEPS) {
+      if (span / s <= MAX_LABELS) { labelStep = s; break; }
+    }
     ctx.fillStyle = colors.textSecondary;
-    ctx.font = '10px sans-serif';
+    ctx.font = themeFont(10);
     ctx.textAlign = 'center';
-    for (let f = -L.F; f <= L.F; f++) {
+    // First tick is the nearest multiple of labelStep at or above fLo, so
+    // ticks land on round numbers (…, -10, 0, 10, …) rather than drifting
+    // with fLo as F eases.
+    const firstTick = Math.ceil(fLo / labelStep) * labelStep;
+    for (let f = firstTick; f <= fHi; f += labelStep) {
       const px = xToPx(f, L);
       ctx.strokeStyle = colors.border;
       ctx.globalAlpha = 0.35;
@@ -167,9 +208,7 @@ export function createSpectrumView(canvas, store, opts = {}) {
       ctx.lineTo(px, L.plotY + L.plotH + 4);
       ctx.stroke();
       ctx.globalAlpha = 1;
-      if (f % labelStep === 0) {
-        ctx.fillText(String(f), px, L.plotY + L.plotH + 15);
-      }
+      ctx.fillText(String(f), px, L.plotY + L.plotH + 15);
     }
     // y-axis ticks (0, half, max).
     ctx.textAlign = 'right';
@@ -286,6 +325,26 @@ export function createSpectrumView(canvas, store, opts = {}) {
       });
     }
 
+    // Affordance hint: shown only while nothing is selected and before the
+    // user's first interaction with this view.
+    if (!state.selectedId && !hasInteracted) {
+      ctx.font = themeFont(11);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = colors.textSecondary;
+      ctx.globalAlpha = 0.55;
+      const cx = L.plotX + L.plotW / 2;
+      const cy = L.plotY + L.plotH / 2;
+      ctx.fillText('drag a stem: ↕ amplitude ↔ frequency', cx, cy - 7);
+      ctx.fillText(
+        'alt-drag or ring: phase · double-click: add · Del: remove',
+        cx,
+        cy + 7,
+      );
+      ctx.globalAlpha = 1;
+      ctx.textBaseline = 'alphabetic';
+    }
+
     ctx.restore();
   }
 
@@ -336,10 +395,12 @@ export function createSpectrumView(canvas, store, opts = {}) {
     const { x, y } = localXY(evt);
     const state = store.get();
     canvas.focus();
+    markInteracted();
 
     const ring = hitRingHandle(x, y, state);
     if (ring) {
       dragging = { id: ring.id, mode: 'phase-ring' };
+      canvas.style.cursor = ROTATE_CURSOR;
       canvas.setPointerCapture(evt.pointerId);
       evt.preventDefault();
       return;
@@ -353,11 +414,12 @@ export function createSpectrumView(canvas, store, opts = {}) {
         mode: 'move',
         startFreqInt: Math.round(head.comp.freq),
         // Captured so a shift-drop merge combines the component's pre-drag
-        // amp/phase, not a value already nudged by a shift+vertical phase
+        // amp/phase, not a value already nudged by an alt+vertical phase
         // gesture earlier in the same drag.
         origAmp: head.comp.amp,
         origPhase: head.comp.phase,
       };
+      canvas.style.cursor = 'grabbing';
       canvas.setPointerCapture(evt.pointerId);
       evt.preventDefault();
       return;
@@ -369,6 +431,7 @@ export function createSpectrumView(canvas, store, opts = {}) {
   function onDblClick(evt) {
     const { x, y } = localXY(evt);
     const state = store.get();
+    markInteracted();
     // Ignore dblclick on an existing stem/head (that's a selection double-click,
     // not "add"); only add when the second click lands on empty plot area.
     if (hitHead(x, y) || hitStem(x, y)) return;
@@ -382,9 +445,17 @@ export function createSpectrumView(canvas, store, opts = {}) {
   function onPointerMove(evt) {
     const { x, y } = localXY(evt);
     if (!dragging) {
-      const hit = hitHead(x, y) || hitStem(x, y);
+      const state = store.get();
+      const ring = hitRingHandle(x, y, state);
+      const hit = ring || hitHead(x, y) || hitStem(x, y);
       hoverId = hit ? hit.id : null;
-      canvas.style.cursor = hit ? 'ns-resize' : 'default';
+      if (ring) {
+        canvas.style.cursor = ROTATE_CURSOR;
+      } else if (hit) {
+        canvas.style.cursor = 'grab';
+      } else {
+        canvas.style.cursor = 'crosshair';
+      }
       return;
     }
     const state = store.get();
@@ -401,14 +472,20 @@ export function createSpectrumView(canvas, store, opts = {}) {
       return;
     }
 
-    // mode === 'move'
-    const freqInt = Math.round(pxToX(x, layout));
+    // mode === 'move'. The x-range (layout.F) is frozen by computeLayout
+    // while `dragging` is set, and freqInt is clamped to MAX_FREQ here (in
+    // addition to the store's own sanitizeComponent) so the displayed value
+    // can't run away even if the pointer is dragged far past the canvas edge.
+    let freqInt = Math.round(pxToX(x, layout));
+    freqInt = Math.max(-MAX_FREQ, Math.min(MAX_FREQ, freqInt));
     if (freqInt !== dragging.startFreqInt) {
       freqAnim.set(dragging.id, { from: dragging.startFreqInt, start: performance.now() });
       dragging.startFreqInt = freqInt;
     }
 
-    if (evt.shiftKey || evt.altKey) {
+    if (evt.altKey) {
+      // Phase gesture: alt/option + vertical drag (ring handle also works).
+      // Shift is reserved for shift-drop = merge and must not affect phase.
       if (dragging.phaseStartY === undefined) {
         dragging.phaseStartY = y;
         dragging.phaseStart = comp.phase;
@@ -418,7 +495,8 @@ export function createSpectrumView(canvas, store, opts = {}) {
     } else {
       dragging.phaseStartY = undefined;
       const value = Math.max(0, pxToY(y, layout));
-      const amp = ampFromValue(value, state.yScale);
+      let amp = ampFromValue(value, state.yScale);
+      amp = Math.max(0, Math.min(MAX_AMP, amp));
       store.updateComponent(dragging.id, { freq: freqInt, amp }, 'spectrum');
     }
     evt.preventDefault();
@@ -447,14 +525,35 @@ export function createSpectrumView(canvas, store, opts = {}) {
     }
     try { canvas.releasePointerCapture(evt.pointerId); } catch { /* noop */ }
     dragging = null;
+    const { x, y } = localXY(evt);
+    const state = store.get();
+    const ring = hitRingHandle(x, y, state);
+    const hit = ring || hitHead(x, y) || hitStem(x, y);
+    canvas.style.cursor = ring ? ROTATE_CURSOR : (hit ? 'grab' : 'crosshair');
+  }
+
+  /**
+   * True when (x, y) is over the selected component's head or its phase ring
+   * (within RING_RADIUS + RING_HIT of the head), used to gate wheel-as-phase
+   * so the page can still scroll everywhere else on the canvas.
+   */
+  function overSelectedHandle(x, y, state) {
+    if (!state.selectedId) return false;
+    const s = lastStems.find((st) => st.id === state.selectedId);
+    if (!s) return false;
+    return Math.hypot(s.headX - x, s.headY - y) <= RING_RADIUS + RING_HIT;
   }
 
   function onWheel(evt) {
     const state = store.get();
+    if (document.activeElement !== canvas) return; // let the page scroll
     if (!state.selectedId) return;
     const comp = state.components.find((c) => c.id === state.selectedId);
     if (!comp) return;
+    const { x, y } = localXY(evt);
+    if (!overSelectedHandle(x, y, state)) return; // let the page scroll
     evt.preventDefault();
+    markInteracted();
     const step = evt.deltaY > 0 ? -0.02 : 0.02;
     store.updateComponent(state.selectedId, { phase: wrapAngle(comp.phase + step * TWO_PI) }, 'spectrum');
   }
@@ -464,6 +563,7 @@ export function createSpectrumView(canvas, store, opts = {}) {
     const state = store.get();
     if (!state.selectedId) return;
     evt.preventDefault();
+    markInteracted();
     store.removeComponent(state.selectedId);
     store.set({ selectedId: null }, 'spectrum');
   }

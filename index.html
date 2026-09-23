@@ -30,41 +30,44 @@
   </div>
 </header>
 
+<div class="transport-bar">
+  <div class="container transport-bar-inner">
+    <button id="play" class="btn btn-primary" aria-label="Play/pause">
+      <i class="fa-solid fa-pause" id="play-icon"></i>
+    </button>
+    <div class="control-group transport-scrub">
+      <label for="time">t</label>
+      <input type="range" id="time" min="0" max="1" step="0.001" value="0" aria-label="Scrub time">
+    </div>
+    <div class="control-group">
+      <label for="speed">Speed</label>
+      <select id="speed">
+        <option value="0.25">0.25&times;</option>
+        <option value="0.5">0.5&times;</option>
+        <option value="1" selected>1&times;</option>
+        <option value="2">2&times;</option>
+        <option value="4">4&times;</option>
+      </select>
+    </div>
+  </div>
+</div>
+
 <main class="container">
-  <nav class="tabs" role="tablist">
-    <button class="tab-btn active" id="tab-arm" role="tab" aria-selected="true" data-mode="arm">
+  <nav class="tabs" role="tablist" aria-label="Demo views">
+    <button class="tab-btn active" id="tab-arm" role="tab" aria-selected="true" aria-controls="panel-arm" data-mode="arm" tabindex="0">
       <i class="fa-solid fa-hand-spock"></i> Arm
     </button>
-    <button class="tab-btn" id="tab-draw" role="tab" aria-selected="false" data-mode="draw">
+    <button class="tab-btn" id="tab-draw" role="tab" aria-selected="false" aria-controls="panel-draw" data-mode="draw" tabindex="-1">
       <i class="fa-solid fa-pen-nib"></i> Draw
     </button>
-    <button class="tab-btn" id="tab-control" role="tab" aria-selected="false" data-mode="control">
+    <button class="tab-btn" id="tab-control" role="tab" aria-selected="false" aria-controls="panel-control" data-mode="control" tabindex="-1">
       <i class="fa-solid fa-sliders"></i> Control
     </button>
   </nav>
 
   <!-- ============ ARM TAB ============ -->
-  <section class="tab-panel active" id="panel-arm" data-panel="arm">
+  <section class="tab-panel active" id="panel-arm" data-panel="arm" role="tabpanel" aria-labelledby="tab-arm" tabindex="0">
     <div class="controls-panel">
-      <div class="control-group">
-        <button id="play" class="btn btn-primary" aria-label="Play/pause">
-          <i class="fa-solid fa-pause" id="play-icon"></i>
-        </button>
-      </div>
-      <div class="control-group" style="flex:1; min-width:200px;">
-        <label for="time">t</label>
-        <input type="range" id="time" min="0" max="1" step="0.001" value="0" style="width:100%;">
-      </div>
-      <div class="control-group">
-        <label for="speed">Speed</label>
-        <select id="speed">
-          <option value="0.25">0.25&times;</option>
-          <option value="0.5">0.5&times;</option>
-          <option value="1" selected>1&times;</option>
-          <option value="2">2&times;</option>
-          <option value="4">4&times;</option>
-        </select>
-      </div>
       <div class="control-group">
         <label for="yscale-toggle">Spectrum</label>
         <select id="yscale-toggle">
@@ -91,49 +94,61 @@
           <option value="heart">Heart</option>
         </select>
       </div>
+      <div class="control-group" id="terms-group" style="display:none;" title="Number of Fourier terms used to build the selected shape preset">
+        <label for="terms">Terms = <span id="terms-value">6</span></label>
+        <input type="range" id="terms" min="1" max="30" step="1" value="6">
+      </div>
     </div>
 
     <div class="view-grid">
       <div>
         <div class="card view-canvas-wrap">
-          <canvas id="arm-canvas"></canvas>
+          <canvas id="arm-canvas" tabindex="0" aria-label="Interactive robot arm. Drag a joint to rotate the bone below it; shift-drag to also change that bone's length. On bare (non-anatomical) links, drag sets both length and angle."></canvas>
         </div>
         <p class="caption">The puppet arm: each link is one Fourier component &mdash; length = amplitude,
           spin rate = frequency, starting angle = phase. The fading trail is the end-effector path z(t).
-          With the human-arm preset, the bones (upper arm, forearm, hand, and finger joints) are the
-          components and the skin deforms around them. Drag a joint to rotate that bone (everything
-          downstream follows); shift-drag to also change the bone's length.</p>
+          With the human-arm preset (bones outlined by skin), plain-dragging a joint rotates that bone
+          only (everything downstream follows); shift-drag also changes the bone's length. On bare
+          (non-skinned) links, dragging sets both the link's length and its angle at once.</p>
         <div class="card view-canvas-wrap small" style="margin-top: var(--spacing-lg);">
-          <canvas id="spectrum-canvas"></canvas>
+          <canvas id="spectrum-canvas" tabindex="0" aria-label="Frequency spectrum. Drag a stem vertically for amplitude, horizontally for frequency, alt-drag or use the phase ring or mouse wheel for phase, double-click to add a component, Delete to remove the selected one, or shift-drop one stem onto another to merge them."></canvas>
         </div>
-        <p class="caption">Power/amplitude spectrum: one stem per frequency. Drag a stem up/down for
-          amplitude, left/right to change frequency, or around its head to change phase.</p>
+        <p class="caption">Power/amplitude spectrum: one stem per frequency. Drag &uarr;/&darr; for
+          amplitude, &larr;/&rarr; for frequency; alt-drag, the phase ring, or the mouse wheel (while a
+          stem is selected and the pointer is over its head) for phase; double-click empty space to add a
+          component; select a stem and press Delete/Backspace to remove it; shift-drop one stem onto
+          another to merge them into one.</p>
       </div>
-      <div class="card">
+      <div class="card components-card">
         <div class="card-header">
           <span class="card-title">Components</span>
-          <button id="add-component" class="btn btn-secondary btn-small"><i class="fa-solid fa-plus"></i> Add</button>
+          <div class="card-header-actions">
+            <button id="sort-by-freq" class="btn btn-secondary btn-small" title="Reorders the link chain by |frequency| — this changes how the arm bends and moves, not the traced path (the sum, and therefore the path, is order-independent)"><i class="fa-solid fa-arrow-down-short-wide"></i> Sort by |f|</button>
+            <button id="add-component" class="btn btn-secondary btn-small"><i class="fa-solid fa-plus"></i> Add</button>
+          </div>
         </div>
         <div class="editor-header-row">
           <span></span><span>Freq</span><span>Amp</span><span>Phase&deg;</span><span></span>
         </div>
         <div id="editor"></div>
-        <p class="caption">Each row is one term c&middot;e^(i2&pi;ft) of the series. Selected row is
-          highlighted; edits here, on the arm, or on the spectrum all stay in sync.</p>
+        <p class="caption">Each row is one term <em>c</em>&middot;e<sup>i2&pi;<em>ft</em></sup> of the
+          series. Selected row is highlighted; edits here, on the arm, or on the spectrum all stay in
+          sync.</p>
       </div>
     </div>
   </section>
 
   <!-- ============ DRAW TAB ============ -->
-  <section class="tab-panel" id="panel-draw" data-panel="draw">
+  <section class="tab-panel" id="panel-draw" data-panel="draw" role="tabpanel" aria-labelledby="tab-draw" tabindex="0">
     <div class="draw-layout">
       <div>
-        <div class="draw-canvas-wrap">
-          <canvas id="draw-canvas"></canvas>
+        <div class="card view-canvas-wrap draw-canvas-wrap">
+          <canvas id="draw-canvas" tabindex="0" aria-label="Freehand drawing canvas. Just draw on it with a mouse or finger to trace a closed shape."></canvas>
           <div class="draw-hint" id="draw-hint">Draw a closed shape</div>
         </div>
-        <p class="caption">Draw a closed curve (or use the preloaded example). It's resampled, DFT'd, and
-          reconstructed epicycle-by-epicycle &mdash; 3Blue1Brown style &mdash; from the top-K components.</p>
+        <p class="caption">Just draw on the canvas (or use the preloaded example). The stroke is
+          resampled, DFT'd, and reconstructed epicycle-by-epicycle &mdash; 3Blue1Brown style &mdash; from
+          the top-K components.</p>
       </div>
       <div class="draw-panel card">
         <div class="btn-row">
@@ -157,41 +172,52 @@
   </section>
 
   <!-- ============ CONTROL TAB ============ -->
-  <section class="tab-panel" id="panel-control" data-panel="control">
+  <section class="tab-panel" id="panel-control" data-panel="control" role="tabpanel" aria-labelledby="tab-control" tabindex="0">
     <div class="view-grid">
       <div>
         <div class="card view-canvas-wrap">
-          <canvas id="control-arm-canvas"></canvas>
+          <canvas id="control-arm-canvas" tabindex="0" aria-label="Band-limited or actuator-lag-filtered robot arm reconstruction (not interactive)."></canvas>
         </div>
         <p class="caption">Same arm, joints numbered 1..N in series order &mdash; think of each as an
-          actuator spinning at a fixed constant velocity (frequency).</p>
-        <div class="card view-canvas-wrap small" style="margin-top: var(--spacing-lg);">
-          <canvas id="joint-canvas"></canvas>
+          actuator spinning at a fixed constant velocity (frequency). This view is not interactive; go to
+          the Arm tab to drag joints or spectrum stems.</p>
+        <div class="control-group" style="margin-bottom:0;">
+          <label for="angle-mode">Angles</label>
+          <select id="angle-mode" title="Absolute joint angle θ_k, or relative (motor) angle q_k = θ_k − θ_(k-1)">
+            <option value="abs" selected>Absolute (&theta;)</option>
+            <option value="rel">Relative / motor (q)</option>
+          </select>
+          <label for="angle-wrap"><input type="checkbox" id="angle-wrap" title="Wrap angles to (−180°, 180°] instead of showing the unwrapped, ever-growing angle"> Wrap to &plusmn;180&deg;</label>
         </div>
-        <p class="caption">Top: joint angles &theta;<sub>k</sub>(t) over one period (each is a straight
-          ramp for a pure spinning joint). Bottom: mini Bode magnitude plot |c<sub>f</sub>| vs frequency,
-          with the retained passband shaded.</p>
+        <div class="card view-canvas-wrap small" style="margin-top: var(--spacing-sm);">
+          <canvas id="joint-canvas" tabindex="0" aria-label="Top panel: joint angle over time. Bottom panel: signal spectrum with the currently applied filter overlaid."></canvas>
+        </div>
+        <p class="caption">Top: joint angle over one period (absolute &theta;<sub>k</sub>(t) or relative
+          q<sub>k</sub>(t), wrapped or unwrapped per the controls above). Bottom: signal spectrum
+          |c<sub>f</sub>| (light bars) with the filtered spectrum (solid bars) and the filter's magnitude
+          response |H(f)| (line) overlaid &mdash; the band-limit box, the actuator-lag curve, or both.</p>
       </div>
       <div class="card">
         <div class="card-header"><span class="card-title">Bandwidth &amp; tracking</span></div>
         <div class="control-group" style="width:100%;">
           <label for="bandwidth">Bandwidth B = <span id="bandwidth-value">8</span></label>
-          <input type="range" id="bandwidth" min="0" max="40" step="1" value="8" style="flex:1;">
+          <input type="range" id="bandwidth" min="0" max="40" step="1" value="8" style="flex:1;" title="Hard low-pass: only components with |f| ≤ B survive">
         </div>
         <div class="stat-row"><span>Energy captured</span><strong id="energy-readout">&mdash;</strong></div>
         <div class="stat-row"><span>Tracking error</span><strong id="tracking-error">&mdash;</strong></div>
         <hr style="border-color: var(--border-color); margin: var(--spacing-sm) 0;">
         <div class="control-group">
-          <label for="feedback-toggle"><input type="checkbox" id="feedback-toggle"> Actuator lag (feedback)</label>
+          <label for="feedback-toggle"><input type="checkbox" id="feedback-toggle" title="Also apply a smooth first-order actuator-lag filter on top of the bandwidth limit"> Actuator lag (feedback)</label>
         </div>
         <div class="control-group" style="width:100%;">
           <label for="fc-slider">f<sub>c</sub> = <span id="fc-value">5</span></label>
-          <input type="range" id="fc-slider" min="0.5" max="20" step="0.5" value="5" style="flex:1;">
+          <input type="range" id="fc-slider" min="0.5" max="20" step="0.5" value="5" style="flex:1;" title="Lag filter cutoff frequency (only active when actuator lag is on)">
         </div>
         <p class="caption">Truncating to |f| &le; B is a hard low-pass filter on actuator bandwidth: only
-          components inside the passband survive, so the tip can only track band-limited paths. The lag
-          toggle instead applies a smooth first-order filter H(f) = 1/(1 + i f/f<sub>c</sub>), shrinking and
-          phase-delaying every component &mdash; a more realistic actuator model.</p>
+          components inside the passband survive, so the tip can only track band-limited paths. The
+          bandwidth limit always applies; switching on actuator lag additionally applies a smooth
+          first-order filter H(f) = 1/(1 + i f/f<sub>c</sub>) on top of it, shrinking and phase-delaying
+          every surviving component &mdash; a more realistic actuator model.</p>
       </div>
     </div>
   </section>

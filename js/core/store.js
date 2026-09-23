@@ -5,7 +5,50 @@
 
 import { sampleSeries, toCoeff } from './fourier.js';
 
-const PALETTE = ['#267aba', '#ffa00f', '#a5d75f', '#8a6996', '#d94415', '#f5dc69', '#c4dd88', '#9d162e'];
+export const PALETTE = ['#267aba', '#ffa00f', '#a5d75f', '#8a6996', '#d94415', '#f5dc69', '#c4dd88', '#9d162e'];
+
+/** Largest (in magnitude) frequency a component may hold, in cycles/period. */
+export const MAX_FREQ = 64;
+/** Largest amplitude a component may hold. */
+export const MAX_AMP = 5;
+
+/** Wrap a phase (radians) into (−π, π]. */
+function wrapPhase(phase) {
+  let x = phase % (2 * Math.PI);
+  if (x <= -Math.PI) x += 2 * Math.PI;
+  if (x > Math.PI) x -= 2 * Math.PI;
+  return x;
+}
+
+function clamp(x, lo, hi) {
+  return Math.max(lo, Math.min(hi, x));
+}
+
+/**
+ * Clamp/repair a component's freq/amp/phase so every store entry point holds
+ * safe, in-range values regardless of what a drag, editor field, or preset
+ * hands in. Other fields (id, color, label, ...) pass through untouched.
+ * - freq: rounded to the nearest integer, clamped to [−MAX_FREQ, MAX_FREQ] (NaN → 0;
+ *   ±Infinity clamp to ±MAX_FREQ like any other too-large value)
+ * - amp: clamped to [0, MAX_AMP] (NaN → 0; +Infinity clamps to MAX_AMP)
+ * - phase: finite, wrapped to (−π, π] (NaN or ±Infinity → 0)
+ * @param {object} c
+ * @returns {object}
+ */
+export function sanitizeComponent(c) {
+  let freq = Math.round(Number(c.freq));
+  if (Number.isNaN(freq)) freq = 0;
+  freq = clamp(freq, -MAX_FREQ, MAX_FREQ);
+
+  let amp = Number(c.amp);
+  if (Number.isNaN(amp)) amp = 0;
+  amp = clamp(amp, 0, MAX_AMP);
+
+  let phase = Number(c.phase);
+  phase = Number.isFinite(phase) ? wrapPhase(phase) : 0;
+
+  return { ...c, freq, amp, phase };
+}
 
 function defaultState() {
   return {
@@ -48,12 +91,12 @@ export function createStore(initial = {}) {
   function withIds(list) {
     const seen = new Set();
     return list.map((c) => {
-      let out = c;
-      if (c.id == null || seen.has(c.id)) {
+      let out = sanitizeComponent(c);
+      if (out.id == null || seen.has(out.id)) {
         const id = nextId++;
-        out = { ...c, id };
-      } else if (c.id >= nextId) {
-        nextId = c.id + 1;
+        out = { ...out, id };
+      } else if (out.id >= nextId) {
+        nextId = out.id + 1;
       }
       if (!out.color) out = { ...out, color: PALETTE[(out.id - 1) % PALETTE.length] };
       seen.add(out.id);
@@ -97,7 +140,7 @@ export function createStore(initial = {}) {
     updateComponent(id, patch, source) {
       state = {
         ...state,
-        components: state.components.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+        components: state.components.map((c) => (c.id === id ? sanitizeComponent({ ...c, ...patch }) : c)),
       };
       dirty = true;
       notify(new Set(['components']), source);
@@ -107,7 +150,7 @@ export function createStore(initial = {}) {
     addComponent(partial = {}) {
       const id = nextId++;
       const color = PALETTE[(id - 1) % PALETTE.length];
-      const comp = { freq: 0, amp: 0.2, phase: 0, color, ...partial, id };
+      const comp = sanitizeComponent({ freq: 0, amp: 0.2, phase: 0, color, ...partial, id });
       state = { ...state, components: [...state.components, comp] };
       dirty = true;
       notify(new Set(['components']), 'store');

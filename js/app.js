@@ -1,5 +1,5 @@
 // Bootstrap: store wiring, tabs, theme toggle, single rAF loop, tutorial loader.
-import { createStore } from './core/store.js';
+import { createStore, PALETTE } from './core/store.js';
 import { preset } from './core/presets.js';
 import { lowpass, fromCoeff } from './core/fourier.js';
 import { createArmView } from './ui/armView.js';
@@ -47,32 +47,11 @@ if (themeToggle) {
 
 // ---------- Store ----------
 
-// Workaround: neither createStore's initial merge nor store.setComponents()
-// assign ids/colors to id-less components (only addComponent does), even
-// though presets.js documents "the store assigns those". Components sharing
-// id === undefined would all match `c.id === id` in removeComponent/
-// updateComponent, so every caller that hands the store a fresh preset/DFT
-// component list must stamp ids+colors itself first. Ids start from a block
-// far above anything store.addComponent will ever generate.
-const PALETTE = ['#267aba', '#ffa00f', '#a5d75f', '#8a6996', '#d94415', '#f5dc69', '#c4dd88', '#9d162e'];
-let externalIdCounter = 1000000;
-function withIdsAndColors(list) {
-  return list.map((c, i) => ({ ...c, id: externalIdCounter++, color: PALETTE[i % PALETTE.length] }));
-}
-
-function initialComponents() {
-  try {
-    return preset('arm');
-  } catch (err) {
-    // The 'arm' preset (human-arm bones) lands alongside js/ui/armSkin.js;
-    // fall back gracefully if this loads before that work is in place.
-    console.warn('preset("arm") unavailable, falling back to "star":', err.message);
-    return preset('star', 6);
-  }
-}
-
+// store.js assigns ids + palette colors to every component (withIds runs on
+// the initial merge, setComponents, updateComponent and addComponent), so
+// callers can hand it raw preset()/DFT output directly.
 const store = createStore({
-  components: withIdsAndColors(initialComponents()),
+  components: preset('arm'),
   t: 0,
   playing: true,
   speed: 1,
@@ -108,8 +87,34 @@ for (const btn of tabButtons) {
   });
 }
 
+// Roving tabindex + arrow-key navigation for the tablist (WAI-ARIA tabs pattern).
+const tabsNav = document.querySelector('.tabs[role="tablist"]');
+if (tabsNav) {
+  tabsNav.addEventListener('keydown', (e) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    const idx = tabButtons.indexOf(document.activeElement);
+    if (idx === -1) return;
+    e.preventDefault();
+    let next;
+    if (e.key === 'ArrowLeft') next = (idx - 1 + tabButtons.length) % tabButtons.length;
+    else if (e.key === 'ArrowRight') next = (idx + 1) % tabButtons.length;
+    else if (e.key === 'Home') next = 0;
+    else next = tabButtons.length - 1;
+    tabButtons[next].focus();
+    store.set({ mode: tabButtons[next].dataset.mode }, 'tabs');
+  });
+}
+
+function syncTabIndex(state) {
+  for (const btn of tabButtons) {
+    btn.tabIndex = btn.dataset.mode === state.mode ? 0 : -1;
+  }
+}
+
 store.subscribe((state) => syncTabs(state), ['mode']);
+store.subscribe((state) => syncTabIndex(state), ['mode']);
 syncTabs(store.get());
+syncTabIndex(store.get());
 
 // ---------- Arm-tab controls ----------
 
@@ -122,6 +127,9 @@ const circlesEl = document.getElementById('circles-toggle');
 const skinEl = document.getElementById('skin-toggle');
 const presetsEl = document.getElementById('presets');
 const addComponentBtn = document.getElementById('add-component');
+const termsGroupEl = document.getElementById('terms-group');
+const termsEl = document.getElementById('terms');
+const termsValueEl = document.getElementById('terms-value');
 
 function syncPlayIcon(state) {
   if (playIcon) playIcon.className = state.playing ? 'fa-solid fa-pause' : 'fa-solid fa-play';
@@ -164,11 +172,26 @@ if (skinEl) {
   });
 }
 
+function applyPreset() {
+  const name = presetsEl.value;
+  if (!name) return;
+  const n = name === 'arm' ? undefined : Math.max(1, Math.min(30, parseInt(termsEl.value, 10) || 6));
+  store.setComponents(preset(name, n), 'presets');
+}
+
 presetsEl.addEventListener('change', () => {
-  if (!presetsEl.value) return;
-  const comps = withIdsAndColors(preset(presetsEl.value, 6));
-  store.setComponents(comps, 'presets');
+  if (termsGroupEl) {
+    termsGroupEl.style.display = presetsEl.value && presetsEl.value !== 'arm' ? 'flex' : 'none';
+  }
+  applyPreset();
 });
+
+if (termsEl) {
+  termsEl.addEventListener('input', () => {
+    if (termsValueEl) termsValueEl.textContent = termsEl.value;
+    if (presetsEl.value && presetsEl.value !== 'arm') applyPreset();
+  });
+}
 
 addComponentBtn.addEventListener('click', () => {
   const { components } = store.get();
@@ -219,9 +242,10 @@ function bandLimitedComponents() {
   const feedbackEl = document.getElementById('feedback-toggle');
   const fcEl = document.getElementById('fc-slider');
   const useLag = feedbackEl && feedbackEl.checked;
-  const filtered = useLag
-    ? lowpass(entries, Math.max(0.01, parseFloat(fcEl.value)))
-    : entries.filter((e) => Math.abs(e.freq) <= state.bandwidth);
+  // Bandwidth truncation always applies; actuator lag, when enabled, applies
+  // on top of it (both filters stack rather than being mutually exclusive).
+  const bandLimited = entries.filter((e) => Math.abs(e.freq) <= state.bandwidth);
+  const filtered = useLag ? lowpass(bandLimited, Math.max(0.01, parseFloat(fcEl.value))) : bandLimited;
   return filtered.map((c, i) => fromCoeff(c, { id: `bw-${i}`, color: PALETTE[i % PALETTE.length] }));
 }
 const controlArmView = createArmView(controlArmCanvas, store, {
@@ -246,7 +270,7 @@ function frame(ts) {
   lastTs = ts;
 
   const state = store.get();
-  if (state.playing && !scrubbing) {
+  if (state.playing && !scrubbing && !state.dragging) {
     let t = state.t + (dt * state.speed) / 10; // one period ~= 10s at 1x
     t = ((t % 1) + 1) % 1;
     store.setTime(t);
