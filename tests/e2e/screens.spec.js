@@ -841,10 +841,41 @@ test('gesture: pick-up-a-ball preset lifts the ball off the table during the gra
     return { attachedCount, maxRise, restPos: restSt.pos };
   });
   expect(attachedCount, 'the ball must be attached (grasped) for some portion of the period').toBeGreaterThan(0);
-  expect(maxRise, 'the ball must visibly rise above the table while grasped').toBeGreaterThan(0.02);
+  expect(maxRise, 'the ball must lift well above the table while grasped (>= 20% of arm length)').toBeGreaterThan(0.15);
   const pickup = await page.evaluate(() => window.fourierDemo.gesture.PICKUP);
   expect(restPos.re).toBeCloseTo(pickup.ballRestX, 6);
-  expect(restPos.im).toBeCloseTo(pickup.tableY, 6);
+  // The ball's bottom edge, not its center, sits on the table line.
+  expect(restPos.im).toBeCloseTo(pickup.tableY + pickup.ballRadius, 6);
+});
+
+test('gesture: pick-up-a-ball preset never lets any joint or the ball cross below the table', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-arm');
+  await page.selectOption('#presets', 'pickup');
+  await page.waitForTimeout(50);
+
+  const { minJointY, minBallBottom, tableY } = await page.evaluate(() => {
+    const { store, gesture } = window.fourierDemo;
+    const bones = store.get().gesture.bones;
+    const ids = Object.keys(window.fourierDemo.armView.gestureJointsPx());
+    let minJointY = Infinity;
+    let minBallBottom = Infinity;
+    for (let i = 0; i <= 300; i += 1) {
+      const t = i / 300;
+      const fk = gesture.forwardKinematics ? gesture.forwardKinematics(bones, t) : null;
+      if (fk) {
+        for (const id of ids) {
+          const y = fk.get(id).tip.im;
+          if (y < minJointY) minJointY = y;
+        }
+      }
+      const st = gesture.pickupBallState(bones, t);
+      minBallBottom = Math.min(minBallBottom, st.pos.im - gesture.PICKUP.ballRadius);
+    }
+    return { minJointY, minBallBottom, tableY: gesture.PICKUP.tableY };
+  });
+  expect(minJointY, 'no joint may cross below the table').toBeGreaterThanOrEqual(tableY - 1e-6);
+  expect(minBallBottom, "the ball's bottom edge may never cross below the table").toBeGreaterThanOrEqual(tableY - 1e-6);
 });
 
 test('gesture: Control tab bandwidth B=0 freezes the arm at its mean pose', async ({ page }) => {

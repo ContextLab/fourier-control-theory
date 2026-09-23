@@ -59,12 +59,15 @@ const LIMB_PROFILES = {
   ],
 };
 
-// Palm: a slender trapezoid (narrower at the wrist, a touch wider across the
-// knuckles).
+// Palm: a clearly visible plate, distinctly wider across the knuckles than
+// at the wrist — wide enough to comfortably contain all 5 fingers'
+// attachment points (see core/gesture.js's FINGER_SPEC lateral offsets)
+// inside its own edge, so the fingers read as rooted ON the plate rather
+// than floating past it.
 const PALM_PROFILE = [
-  [0, 0.062],
-  [0.4, 0.082],
-  [1, 0.078],
+  [0, 0.07],
+  [0.4, 0.1],
+  [1, 0.115],
 ];
 
 // Finger phalanges: narrow and only mildly tapered. Thumb gets its own,
@@ -261,9 +264,14 @@ const FINGER_ORDER = ['thumb', 'index', 'middle', 'ring', 'little'];
  *   built as its own separate Path2D piece — never merged with another
  *   finger — so gaps between them stay visible even where their strokes
  *   nearly touch.
- * @param {{scalePx?:number, colors?:object, xray?:boolean, selectedIndex?:number}} [opts]
- *   selection/hover handles for individual joints (main or finger) are drawn
- *   by the caller (armView.js), not here.
+ * @param {{scalePx?:number, colors?:object, xray?:boolean, selectedIndex?:number,
+ *   parts?: 'all'|'main'|'fingers'}} [opts] - `parts` (default 'all') draws
+ *   only the main chain (arm+palm) or only the 5 fingers, so a caller can
+ *   sandwich something (e.g. the pick-up-ball's ball) between the two: draw
+ *   'main', draw the object, draw 'fingers' on top of it, so a closed hand's
+ *   fingers visibly wrap around it instead of hiding it entirely. Selection/
+ *   hover handles for individual joints (main or finger) are drawn by the
+ *   caller (armView.js), not here.
  */
 export function drawArmSkin(ctx, mainJointsPx, fingerJointsPx = {}, opts = {}) {
   if (!Array.isArray(mainJointsPx) || mainJointsPx.length < 2 || mainJointsPx.some((p) => !isFinitePt(p))) {
@@ -271,6 +279,9 @@ export function drawArmSkin(ctx, mainJointsPx, fingerJointsPx = {}, opts = {}) {
   }
   const colors = { ...DEFAULT_COLORS, ...(opts.colors || {}) };
   const xray = !!opts.xray;
+  const parts = opts.parts || 'all';
+  const wantMain = parts !== 'fingers';
+  const wantFingers = parts !== 'main';
   const n = mainJointsPx.length - 1; // number of main bones present (1..3)
 
   const dirs = dirsThrough(mainJointsPx);
@@ -290,34 +301,38 @@ export function drawArmSkin(ctx, mainJointsPx, fingerJointsPx = {}, opts = {}) {
 
   const pieces = []; // Path2D list: stroked (outline) then filled (opaque union)
   const capPieces = []; // small circular seam-blend / rivet caps, filled only
+  const fingerHinges = []; // {p, r} metal hinge rings drawn at every finger joint
+
+  const hasPalm = n >= 3;
+  const limbCount = Math.min(n, 2);
+  const limbDirs = dirs.slice(0, limbCount);
 
   // -- Upper arm (+ forearm): one continuous tapered tube ------------------
-  const limbCount = Math.min(n, 2);
-  const limbPoints = mainJointsPx.slice(0, limbCount + 1);
-  const limbDirs = dirs.slice(0, limbCount);
-  const limbWidthAt = (seg, u) => {
-    const profile = seg === 0 ? LIMB_PROFILES.upperArm : LIMB_PROFILES.forearm;
-    return armScale * profileAt(profile, u);
-  };
-  const limbTube = buildTube(limbPoints, limbDirs, limbWidthAt, MIN_HALF, MAX_HALF);
-  const shoulderCap = {
-    center: mainJointsPx[0],
-    normal: limbTube.jointNormal[0],
-    dir: { x: -limbDirs[0].x, y: -limbDirs[0].y },
-    width: limbTube.jointWidth[0],
-  };
-  const hasPalm = n >= 3;
-  const limbTipCap = hasPalm
-    ? null
-    : { center: mainJointsPx[limbCount], normal: limbTube.jointNormal[limbCount], dir: limbDirs[limbCount - 1], width: limbTube.jointWidth[limbCount] };
-  pieces.push(tubeToPath(limbTube, shoulderCap, limbTipCap));
-  if (limbCount === 2) capPieces.push(circlePath(mainJointsPx[1], limbTube.jointWidth[1] * 1.05));
+  let limbTube = null;
+  if (wantMain) {
+    const limbPoints = mainJointsPx.slice(0, limbCount + 1);
+    const limbWidthAt = (seg, u) => {
+      const profile = seg === 0 ? LIMB_PROFILES.upperArm : LIMB_PROFILES.forearm;
+      return armScale * profileAt(profile, u);
+    };
+    limbTube = buildTube(limbPoints, limbDirs, limbWidthAt, MIN_HALF, MAX_HALF);
+    const shoulderCap = {
+      center: mainJointsPx[0],
+      normal: limbTube.jointNormal[0],
+      dir: { x: -limbDirs[0].x, y: -limbDirs[0].y },
+      width: limbTube.jointWidth[0],
+    };
+    const limbTipCap = hasPalm
+      ? null
+      : { center: mainJointsPx[limbCount], normal: limbTube.jointNormal[limbCount], dir: limbDirs[limbCount - 1], width: limbTube.jointWidth[limbCount] };
+    pieces.push(tubeToPath(limbTube, shoulderCap, limbTipCap));
+    if (limbCount === 2) capPieces.push(circlePath(mainJointsPx[1], limbTube.jointWidth[1] * 1.05));
+  }
 
   // -- Palm: a rounded trapezoid from the wrist to the knuckles ------------
   let palmTube = null;
-  let handDir = null;
-  if (hasPalm) {
-    handDir = dirs[2];
+  let handDir = hasPalm ? dirs[2] : null;
+  if (wantMain && hasPalm) {
     const palmPoints = mainJointsPx.slice(2, 4);
     const palmWidthAt = (_seg, u) => armScale * profileAt(PALM_PROFILE, u);
     palmTube = buildTube(palmPoints, [handDir], palmWidthAt, MIN_HALF, MAX_HALF);
@@ -330,7 +345,7 @@ export function drawArmSkin(ctx, mainJointsPx, fingerJointsPx = {}, opts = {}) {
   // -- Fingers: 5 real chains (thumb + 4 fingers), each a 3-segment tapered
   // tube through [base, j1, j2, j3]. Widths still come from `armScale`, not
   // from these (often small) bones' own length.
-  if (hasPalm) {
+  if (wantFingers && hasPalm) {
     const segProfiles = (name) => (name === 'thumb' ? THUMB_PROFILES : FINGER_PROFILES);
     const profileForSeg = (name, seg, segCount) => {
       const profiles = segProfiles(name);
@@ -352,7 +367,10 @@ export function drawArmSkin(ctx, mainJointsPx, fingerJointsPx = {}, opts = {}) {
       const tipIdx = segCount;
       const tipCap = { center: pts[tipIdx], normal: tube.jointNormal[tipIdx], dir: fDirs[segCount - 1], width: tube.jointWidth[tipIdx] };
       pieces.push(tubeToPath(tube, null, tipCap));
-      for (let k = 0; k < pts.length - 1; k++) capPieces.push(circlePath(pts[k], tube.jointWidth[k] * 1.05));
+      for (let k = 0; k < pts.length - 1; k++) {
+        capPieces.push(circlePath(pts[k], tube.jointWidth[k] * 1.05));
+        fingerHinges.push({ p: pts[k], r: tube.jointWidth[k] });
+      }
     }
   }
 
@@ -409,33 +427,38 @@ export function drawArmSkin(ctx, mainJointsPx, fingerJointsPx = {}, opts = {}) {
 
   // -- Decorative overlays, drawn on top of the finished opaque union. -----
 
-  // Specular highlight stripe along the "near" side of the limb + palm —
-  // reads as a bright reflection running down a metal tube.
-  ctx.beginPath();
-  ctx.moveTo(limbTube.leftPts[0].x, limbTube.leftPts[0].y);
-  curveThrough(ctx, limbTube.leftPts.slice(1));
-  if (palmTube) curveThrough(ctx, palmTube.leftPts);
-  ctx.strokeStyle = colors.skinHighlight;
-  ctx.globalAlpha = 0.4;
-  ctx.lineWidth = Math.max(1, armScale * 0.02);
-  ctx.stroke();
-  ctx.globalAlpha = 1;
+  if (limbTube) {
+    // Specular highlight stripe along the "near" side of the limb + palm —
+    // reads as a bright reflection running down a metal tube.
+    ctx.beginPath();
+    ctx.moveTo(limbTube.leftPts[0].x, limbTube.leftPts[0].y);
+    curveThrough(ctx, limbTube.leftPts.slice(1));
+    if (palmTube) curveThrough(ctx, palmTube.leftPts);
+    ctx.strokeStyle = colors.skinHighlight;
+    ctx.globalAlpha = 0.4;
+    ctx.lineWidth = Math.max(1, armScale * 0.02);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
 
-  // Subtle shading along the far side.
-  ctx.beginPath();
-  ctx.moveTo(limbTube.rightPts[0].x, limbTube.rightPts[0].y);
-  curveThrough(ctx, limbTube.rightPts.slice(1));
-  if (palmTube) curveThrough(ctx, palmTube.rightPts);
-  ctx.strokeStyle = colors.skinShade;
-  ctx.globalAlpha = 0.4;
-  ctx.lineWidth = Math.max(1, armScale * 0.025);
-  ctx.stroke();
-  ctx.globalAlpha = 1;
+    // Subtle shading along the far side.
+    ctx.beginPath();
+    ctx.moveTo(limbTube.rightPts[0].x, limbTube.rightPts[0].y);
+    curveThrough(ctx, limbTube.rightPts.slice(1));
+    if (palmTube) curveThrough(ctx, palmTube.rightPts);
+    ctx.strokeStyle = colors.skinShade;
+    ctx.globalAlpha = 0.4;
+    ctx.lineWidth = Math.max(1, armScale * 0.025);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
 
-  // Panel-seam rings (rivets/hinges) at the elbow and wrist.
+  // Panel-seam rings (rivets/hinges) at the elbow, wrist, and every finger
+  // joint — a small metal ring + bright center dot, so every joint reads as
+  // a mechanical hinge even before any colored drag-handle is drawn on top.
   const seamJoints = [];
-  if (limbCount === 2) seamJoints.push({ p: mainJointsPx[1], r: limbTube.jointWidth[1] });
-  if (hasPalm) seamJoints.push({ p: mainJointsPx[2], r: palmTube.jointWidth[0] });
+  if (limbTube && limbCount === 2) seamJoints.push({ p: mainJointsPx[1], r: limbTube.jointWidth[1] });
+  if (palmTube) seamJoints.push({ p: mainJointsPx[2], r: palmTube.jointWidth[0] });
+  for (const h of fingerHinges) seamJoints.push(h);
   for (const { p, r } of seamJoints) {
     ctx.beginPath();
     ctx.arc(p.x, p.y, Math.max(2, r * 0.62), 0, Math.PI * 2);

@@ -130,8 +130,11 @@ test('pickupBallBones: all five fingers share an identical flex curve (symmetric
   }
 });
 
-test('pickupBallState: the ball attaches during the grasp window and rises above the table', () => {
+test('pickupBallState: the ball attaches during the grasp window and rises well above the table', () => {
   const bones = pickupBallBones();
+  const totalArmLength = bones
+    .filter((b) => MAIN_JOINT_IDS.includes(b.id))
+    .reduce((sum, b) => sum + b.length, 0);
   const attachedTs = [];
   let maxRise = -Infinity;
   for (let i = 0; i <= 400; i++) {
@@ -143,15 +146,61 @@ test('pickupBallState: the ball attaches during the grasp window and rises above
     }
   }
   assert.ok(attachedTs.length > 0, 'the ball must attach at some point in the period');
-  assert.ok(maxRise > 0.02, `ball must visibly rise above the table while grasped, got ${maxRise}`);
+  assert.ok(
+    maxRise >= 0.2 * totalArmLength,
+    `ball must lift at least 20% of the total arm length (${(0.2 * totalArmLength).toFixed(3)}) above the table, got ${maxRise.toFixed(3)}`,
+  );
 });
 
-test('pickupBallState: at rest (not attached) the ball sits exactly at its table resting spot', () => {
+test('pickupBallState: at the grasp instant, the fingertip centroid is within ~a ball radius of the ball', () => {
+  const bones = pickupBallBones();
+  const st = pickupBallState(bones, PICKUP.graspT);
+  assert.ok(st.attached, 'the hand must be grasping at the authored grasp instant');
+  assert.ok(
+    st.dist <= PICKUP.ballRadius,
+    `palm/fingertip-to-ball distance at grasp should be ~= the ball radius (${PICKUP.ballRadius}), got ${st.dist}`,
+  );
+});
+
+test('pickupBallState: at rest (not attached) the ball sits exactly at its table resting spot, bottom tangent to the table line', () => {
   const bones = pickupBallBones();
   const st = pickupBallState(bones, 0);
   assert.equal(st.attached, false);
   assert.equal(st.pos.re, PICKUP.ballRestX);
-  assert.equal(st.pos.im, PICKUP.tableY);
+  assert.equal(st.pos.im, PICKUP.tableY + PICKUP.ballRadius);
+  close(st.pos.im - PICKUP.ballRadius, PICKUP.tableY); // ball's bottom edge, not its center, touches the table
+});
+
+test('pickupBallBones: nothing (any main or finger joint) ever crosses below the table line', () => {
+  const bones = pickupBallBones();
+  let minY = Infinity;
+  let minId = '';
+  for (let i = 0; i <= 500; i += 1) {
+    const t = i / 500;
+    const fk = forwardKinematics(bones, t);
+    for (const id of ALL_JOINT_IDS) {
+      const y = fk.get(id).tip.im;
+      if (y < minY) { minY = y; minId = id; }
+    }
+  }
+  assert.ok(
+    minY >= PICKUP.tableY - 1e-6,
+    `no joint may cross below the table (y=${PICKUP.tableY}); got ${minId} at y=${minY}`,
+  );
+});
+
+test('pickupBallState: the ball never dips below the table line, attached or not', () => {
+  const bones = pickupBallBones();
+  let minBallBottom = Infinity;
+  for (let i = 0; i <= 500; i += 1) {
+    const t = i / 500;
+    const st = pickupBallState(bones, t);
+    minBallBottom = Math.min(minBallBottom, st.pos.im - PICKUP.ballRadius);
+  }
+  assert.ok(
+    minBallBottom >= PICKUP.tableY - 1e-6,
+    `ball's bottom edge must never cross below the table (y=${PICKUP.tableY}); got ${minBallBottom}`,
+  );
 });
 
 // --- wave hello sanity: human-ish joint ranges, tip oscillates ------------

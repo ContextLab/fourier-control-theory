@@ -48,6 +48,82 @@ export function evalSeries(series, t) {
   return v;
 }
 
+function clampUnit(x) {
+  return Math.max(0, Math.min(1, x));
+}
+function smoothstep01(x) {
+  const c = clampUnit(x);
+  return c * c * (3 - 2 * c);
+}
+
+/**
+ * Build a periodic function from explicit (time, value) keyframes, smoothly
+ * eased (smoothstep) between consecutive keyframes and wrapping from the
+ * last keyframe back to the first at t=1. Used to author a multi-phase
+ * gesture (reach, grasp, lift, hold, lower, release, withdraw) directly as a
+ * pose sequence, which {@link fitHarmonics} then approximates with a
+ * bounded-H Fourier series.
+ * @param {Array<[number, number]>} keyframes - [t in [0,1), value] pairs, any order
+ * @returns {(t:number)=>number}
+ */
+function keyframeFn(keyframes) {
+  const kfs = keyframes.slice().sort((a, b) => a[0] - b[0]);
+  const n = kfs.length;
+  return (t) => {
+    const tt = ((t % 1) + 1) % 1;
+    for (let i = 0; i < n; i += 1) {
+      const [t0, v0] = kfs[i];
+      const isLast = i === n - 1;
+      const t1 = isLast ? kfs[0][0] + 1 : kfs[i + 1][0];
+      const v1 = isLast ? kfs[0][1] : kfs[i + 1][1];
+      if (tt >= t0 && (tt < t1 || isLast)) {
+        const span = t1 - t0;
+        const u = span > 1e-9 ? (tt - t0) / span : 0;
+        return v0 + (v1 - v0) * smoothstep01(u);
+      }
+    }
+    return kfs[0][1];
+  };
+}
+
+/**
+ * Least-squares (exact, via numerical integration) real Fourier fit of a
+ * periodic function to H harmonics: the best possible q̄ + Σ a_h cos(2πht+ψ_h)
+ * approximation with only H harmonics, which is how the keyframed gesture
+ * presets stay within this module's H≤4 joint-angle-series model while still
+ * hitting explicit target poses (reach, grasp, lift, ...) at chosen times.
+ * @param {(t:number)=>number} fn - periodic (period 1), value in radians
+ * @param {number} [H=4]
+ * @param {number} [N=512] - sample count for the numerical integration
+ * @returns {{mean:number, harmonics:Array<{h:number,amp:number,phase:number}>}}
+ */
+function fitHarmonics(fn, H = 4, N = 512) {
+  let mean = 0;
+  const A = new Array(H + 1).fill(0);
+  const B = new Array(H + 1).fill(0);
+  for (let n = 0; n < N; n += 1) {
+    const t = n / N;
+    const v = fn(t);
+    mean += v;
+    for (let h = 1; h <= H; h += 1) {
+      const theta = 2 * Math.PI * h * t;
+      A[h] += v * Math.cos(theta);
+      B[h] += v * Math.sin(theta);
+    }
+  }
+  mean /= N;
+  const harmonics = [];
+  for (let h = 1; h <= H; h += 1) {
+    const Ah = (2 * A[h]) / N;
+    const Bh = (2 * B[h]) / N;
+    const amp = Math.hypot(Ah, Bh);
+    if (amp < 1e-7) continue;
+    const phase = Math.atan2(-Bh, Ah);
+    harmonics.push({ h, amp, phase });
+  }
+  return { mean, harmonics };
+}
+
 function dirOf(a) {
   return { re: Math.cos(a), im: Math.sin(a) };
 }
@@ -143,16 +219,19 @@ const GROUP_COLORS = {
  * articulated chains — each its own outline, gaps between them — never as a
  * fused mitten silhouette.
  */
-// `forward` is deliberately small: the palm bone's own tip already IS the
-// knuckle line, so a finger's base should sit almost exactly there (a big
-// forward offset would visually detach the hand from the palm, leaving a
-// gap that reads as the fingers "floating" instead of growing out of it).
+// `forward`/`lateral` are chosen to land INSIDE the palm plate's own rendered
+// edge (see ui/armSkin.js's PALM_PROFILE, which is widened to match): the
+// palm bone's tip is the knuckle line, so the 4 fingers attach very close to
+// it (small `forward`), spread out along it (`lateral`, kept comfortably
+// under the palm's knuckle-end half-width so nothing floats past the plate's
+// edge), while the thumb attaches further back (negative `forward`, toward
+// the wrist half of the palm) and to one side, opposable.
 const FINGER_SPEC = [
-  { name: 'thumb', group: 'thumb', lengths: [0.05, 0.038, 0.03], lateral: -0.095, forward: -0.03, spread: -55 * DEG },
-  { name: 'index', group: 'index', lengths: [0.058, 0.036, 0.026], lateral: -0.06, forward: 0.01, spread: -8 * DEG },
-  { name: 'middle', group: 'middle', lengths: [0.064, 0.042, 0.03], lateral: -0.02, forward: 0.015, spread: -1 * DEG },
-  { name: 'ring', group: 'ring', lengths: [0.058, 0.038, 0.028], lateral: 0.02, forward: 0.008, spread: 5 * DEG },
-  { name: 'little', group: 'little', lengths: [0.046, 0.03, 0.022], lateral: 0.065, forward: 0, spread: 12 * DEG },
+  { name: 'thumb', group: 'thumb', lengths: [0.05, 0.038, 0.03], lateral: -0.06, forward: -0.045, spread: -55 * DEG },
+  { name: 'index', group: 'index', lengths: [0.058, 0.036, 0.026], lateral: -0.05, forward: 0.01, spread: -8 * DEG },
+  { name: 'middle', group: 'middle', lengths: [0.064, 0.042, 0.03], lateral: -0.018, forward: 0.015, spread: -1 * DEG },
+  { name: 'ring', group: 'ring', lengths: [0.058, 0.038, 0.028], lateral: 0.018, forward: 0.008, spread: 5 * DEG },
+  { name: 'little', group: 'little', lengths: [0.046, 0.03, 0.022], lateral: 0.05, forward: 0, spread: 12 * DEG },
 ];
 
 /** Read-only finger anatomy table (lengths/attachment/spread per finger),
@@ -179,7 +258,7 @@ export function buildMainChain(seriesFor) {
   return [
     { id: 'upperArm', parent: null, length: 0.34, group: 'arm', label: 'Upper arm', color: GROUP_COLORS.arm, series: seriesFor('upperArm') },
     { id: 'forearm', parent: 'upperArm', length: 0.29, group: 'arm', label: 'Forearm (elbow)', color: GROUP_COLORS.arm, series: seriesFor('forearm') },
-    { id: 'palm', parent: 'forearm', length: 0.12, group: 'arm', label: 'Palm (wrist)', color: GROUP_COLORS.arm, series: seriesFor('palm') },
+    { id: 'palm', parent: 'forearm', length: 0.125, group: 'arm', label: 'Palm (wrist)', color: GROUP_COLORS.arm, series: seriesFor('palm') },
   ];
 }
 
@@ -238,16 +317,21 @@ export function relaxedHandSeries(id, finger, jointIndex) {
  */
 export function waveHelloBones() {
   const mainSeries = {
-    upperArm: s(78 * DEG, [{ h: 1, amp: 3 * DEG, phase: 0 }]),
-    forearm: s(78 * DEG, [{ h: 1, amp: 28 * DEG, phase: 0 }]),
-    palm: s(-6 * DEG, [{ h: 1, amp: 35 * DEG, phase: -90 * DEG }]),
+    // Upper arm raised out to the side and held there; the forearm's mean
+    // continues it to roughly vertical (absolute ~90°) and oscillates ±27°
+    // about that, which is what actually swings the hand side to side; the
+    // palm/wrist follows with a smaller, phase-lagged wobble for a floppy
+    // wave rather than a rigid one.
+    upperArm: s(80 * DEG, [{ h: 1, amp: 3 * DEG, phase: 0 }]),
+    forearm: s(10 * DEG, [{ h: 1, amp: 27 * DEG, phase: 0 }]),
+    palm: s(0 * DEG, [{ h: 1, amp: 20 * DEG, phase: -90 * DEG }]),
   };
   const main = buildMainChain((id) => mainSeries[id]);
   const fingers = buildFingerBones('palm', (id, finger, j) => {
     const flutter = { h: 2, amp: 4 * DEG, phase: j * 35 * DEG };
-    if (j === 0) return s(finger.spread - 6 * DEG, [flutter]);
-    if (j === 1) return s(-6 * DEG, [flutter]);
-    return s(-5 * DEG, [flutter]);
+    if (j === 0) return s(finger.spread * 1.3 - 4 * DEG, [flutter]);
+    if (j === 1) return s(-4 * DEG, [flutter]);
+    return s(-4 * DEG, [flutter]);
   });
   return [...main, ...fingers];
 }
@@ -262,31 +346,65 @@ export function waveHelloBones() {
  * @returns {Array<object>} the full 18-bone tree
  */
 export function pickupBallBones() {
-  const mainSeries = {
-    upperArm: s(-18 * DEG, [
-      { h: 1, amp: 52 * DEG, phase: -90 * DEG },
-      { h: 2, amp: 14 * DEG, phase: 90 * DEG },
-    ]),
-    forearm: s(70 * DEG, [
-      { h: 1, amp: 25 * DEG, phase: 90 * DEG },
-      { h: 2, amp: 10 * DEG, phase: -90 * DEG },
-    ]),
-    palm: s(-4 * DEG, [
-      { h: 1, amp: 10 * DEG, phase: 90 * DEG },
-    ]),
+  const H = 4;
+  // Explicit keyframe pose sequence (t = fraction of period; degrees),
+  // authored as ABSOLUTE main-chain angles for readability (0° = +x/right,
+  // 90° = +y/up), then converted to each bone's own RELATIVE series via
+  // fitHarmonics. Holding the SAME pose across two adjacent keyframes (e.g.
+  // 0.15 -> 0.25) means the arm stays put there while only the fingers move.
+  //   REST   — arm relaxed, hanging forward-down.
+  //   TABLE  — reaching down, hand at the table/ball.
+  //   LIFTED — arm raised well above TABLE, carrying the (closed) hand.
+  // TABLE's palm is near-HORIZONTAL (not pointing down the forearm's own
+  // direction): the forearm still angles down to bring the hand to table
+  // height, but the wrist bends so the palm (and therefore the fingers,
+  // which extend from it) reaches for the ball roughly sideways rather than
+  // downward — that's what keeps an OPEN hand's fingertips from extending
+  // past the table line before they ever close (see the module-level
+  // TABLE_HEADROOM search below, which picks the exact numbers).
+  const REST = { upperArm: -50, forearm: 30, palm: 50 };
+  const TABLE = { upperArm: -20, forearm: -95, palm: -10 };
+  const LIFTED = { upperArm: 45, forearm: 25, palm: 15 };
+  // The arm HOLDS the TABLE pose all the way from 0.70 through 0.90 — well
+  // past where the fingers finish releasing (see flexShapeDeg below) — so
+  // the hand is already stationary at table height before the ball lets go,
+  // instead of withdrawing WHILE still (or just barely not) holding it,
+  // which would otherwise pop the released ball from mid-air to the table.
+  const absKeyframesDeg = {
+    upperArm: [[0, REST.upperArm], [0.15, TABLE.upperArm], [0.25, TABLE.upperArm], [0.45, LIFTED.upperArm], [0.55, LIFTED.upperArm], [0.70, TABLE.upperArm], [0.90, TABLE.upperArm], [0.96, REST.upperArm]],
+    forearm: [[0, REST.forearm], [0.15, TABLE.forearm], [0.25, TABLE.forearm], [0.45, LIFTED.forearm], [0.55, LIFTED.forearm], [0.70, TABLE.forearm], [0.90, TABLE.forearm], [0.96, REST.forearm]],
+    palm: [[0, REST.palm], [0.15, TABLE.palm], [0.25, TABLE.palm], [0.45, LIFTED.palm], [0.55, LIFTED.palm], [0.70, TABLE.palm], [0.90, TABLE.palm], [0.96, REST.palm]],
   };
+  const absFn = {};
+  for (const id of MAIN_JOINT_IDS) {
+    absFn[id] = keyframeFn(absKeyframesDeg[id].map(([t, v]) => [t, v * DEG]));
+  }
+  // theta_j = theta_parent + q_j  =>  q_j = theta_j - theta_parent.
+  const relFn = {
+    upperArm: (t) => absFn.upperArm(t),
+    forearm: (t) => absFn.forearm(t) - absFn.upperArm(t),
+    palm: (t) => absFn.palm(t) - absFn.forearm(t),
+  };
+  const mainSeries = {};
+  for (const id of MAIN_JOINT_IDS) mainSeries[id] = fitHarmonics(relFn[id], H);
   const main = buildMainChain((id) => mainSeries[id]);
-  // Identical flex curve for ALL FIVE fingers (the "symmetric pose" the grasp
-  // relies on — see the gesture.test.js "symmetric flex" check): extended
-  // most of the period, closing (more negative relAngle) once near the
-  // bottom of the reach, tuned so the peak coincides with the arm's lowest
-  // point (t ~= 0.70, see pickupBallBones' upperArm/forearm phases above).
-  const flexA = { h: 1, amp: 34 * DEG, phase: -72 * DEG };
-  const flexB = { h: 2, amp: 22 * DEG, phase: 36 * DEG };
+
+  // Finger flex: extended (open) while reaching/withdrawing, closed for the
+  // ENTIRE grasp-lift-hold-lower span (0.25 through 0.80) — not just a brief
+  // moment at the bottom — which is what lets the closed hand actually carry
+  // the ball up to LIFTED and back down again. Identical normalized timeline
+  // for all 5 fingers (the "symmetric pose" the grasp relies on — see
+  // gesture.test.js), each joint scaled by how much it flexes in a real grip
+  // (PIP most, MCP/DIP less).
+  const OPEN_DEG = 0;
+  const CLOSED_DEG = -75;
+  const flexShapeDeg = keyframeFn([[0, OPEN_DEG], [0.15, OPEN_DEG], [0.25, CLOSED_DEG], [0.80, CLOSED_DEG], [0.90, OPEN_DEG]]);
+  const JOINT_SCALE = [0.55, 1, 0.8]; // j = 0 (MCP), 1 (PIP), 2 (DIP)
+  const JOINT_BASELINE_DEG = [-8, -8, -6];
   const fingers = buildFingerBones('palm', (id, finger, j) => {
-    if (j === 0) return s(finger.spread - 8 * DEG, [{ ...flexA, amp: flexA.amp * 0.7 }, { ...flexB, amp: flexB.amp * 0.7 }]);
-    if (j === 1) return s(-8 * DEG, [flexA, flexB]);
-    return s(-6 * DEG, [{ ...flexA, amp: flexA.amp * 0.85 }, { ...flexB, amp: flexB.amp * 0.85 }]);
+    const baselineDeg = j === 0 ? finger.spread / DEG - 8 : JOINT_BASELINE_DEG[j];
+    const scale = JOINT_SCALE[j];
+    return fitHarmonics((t) => (baselineDeg + flexShapeDeg(t) * scale) * DEG, H);
   });
   return [...main, ...fingers];
 }
@@ -298,11 +416,25 @@ const FLEX_JOINT_IDS = ['index2', 'middle2', 'ring2', 'little2'];
 /** Ball + table geometry for the "pick up a ball" preset (world units), tuned
  * to where {@link pickupBallBones}'s fingertip centroid actually reaches. */
 export const PICKUP = {
-  tableY: -0.258,
-  ballRestX: 0.487,
-  ballRadius: 0.045,
-  graspRadius: 0.11,
-  flexThreshold: 30 * DEG,
+  // tableY is set to (a hair below) the LOWEST any joint/fingertip ever
+  // reaches across the whole gesture (see gesture.test.js's "nothing crosses
+  // the table" check) — nothing may cross below the table line. The ball's
+  // RESTING center sits `ballRadius` above that line (bottom tangent to it),
+  // near the x the closing hand actually arrives at (the "TABLE" grasp
+  // keyframe's fingertip centroid, t=0.25).
+  tableY: -0.6,
+  ballRestX: 0.415,
+  ballRadius: 0.06,
+  graspRadius: 0.09,
+  tableHalfWidth: 0.2,
+  // Deliberately high (close to the ~86° fully-closed flex): the ball's
+  // rendered position is the CURRENT fingertip centroid whenever attached,
+  // so attach/detach right when the fingers are almost fully closed keeps
+  // the position jump at that instant small (a fraction of the ball's own
+  // radius) instead of popping from wherever a still-mostly-open hand is.
+  flexThreshold: 65 * DEG,
+  // The exact t of pickupBallBones()'s "TABLE" grasp keyframe — see pickupBallState.
+  graspT: 0.25,
 };
 
 /**
@@ -319,8 +451,7 @@ export const PICKUP = {
  * @param {object} [pickup=PICKUP]
  * @returns {{pos:{re:number,im:number}, attached:boolean, flex:number, dist:number}}
  */
-export function pickupBallState(bones, t, pickup = PICKUP) {
-  const fk = forwardKinematics(bones, t);
+function fingertipCentroid(fk) {
   let cx = 0;
   let cy = 0;
   for (const id of FINGERTIP_IDS) {
@@ -328,16 +459,37 @@ export function pickupBallState(bones, t, pickup = PICKUP) {
     cx += p.re;
     cy += p.im;
   }
-  cx /= FINGERTIP_IDS.length;
-  cy /= FINGERTIP_IDS.length;
+  return { re: cx / FINGERTIP_IDS.length, im: cy / FINGERTIP_IDS.length };
+}
+
+function flexAmount(fk) {
   let flex = 0;
   for (const id of FLEX_JOINT_IDS) flex += -fk.get(id).relAngle;
-  flex /= FLEX_JOINT_IDS.length;
-  const dist = Math.hypot(cx - pickup.ballRestX, cy - pickup.tableY);
-  const attached = flex > pickup.flexThreshold && dist < pickup.graspRadius;
-  const pos = attached
-    ? { re: cx, im: cy }
-    : { re: pickup.ballRestX, im: pickup.tableY };
+  return flex / FLEX_JOINT_IDS.length;
+}
+
+export function pickupBallState(bones, t, pickup = PICKUP) {
+  // The ball's RESTING center: `ballRadius` above the table line, so its
+  // bottom is exactly tangent to it (never crossing below).
+  const restPos = { re: pickup.ballRestX, im: pickup.tableY + pickup.ballRadius };
+  const fk = forwardKinematics(bones, t);
+  const tip = fingertipCentroid(fk);
+  const flex = flexAmount(fk);
+  const dist = Math.hypot(tip.re - restPos.re, tip.im - restPos.im);
+  // Whether the grasp SUCCEEDS at all is decided once, at the gesture's own
+  // authored grasp instant (`graspT`) — not by comparing every t's (possibly
+  // already-lifted, far-away) hand position to the table. This is what lets
+  // the ball travel far from the table while still attached (a real grasp
+  // carries the object with the hand, it doesn't need to stay near where it
+  // was picked up), while still correctly failing to grasp at all when a
+  // band-limited/filtered `bones` never reaches the ball in the first place
+  // (the grasp-instant distance stays large for every t, so `attached` is
+  // false for the whole period).
+  const graspFk = forwardKinematics(bones, pickup.graspT);
+  const graspTip = fingertipCentroid(graspFk);
+  const graspDist = Math.hypot(graspTip.re - restPos.re, graspTip.im - restPos.im);
+  const attached = graspDist < pickup.graspRadius && flex > pickup.flexThreshold;
+  const pos = attached ? tip : restPos;
   return { pos, attached, flex, dist };
 }
 

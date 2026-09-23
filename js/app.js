@@ -9,7 +9,7 @@ import { createDrawView } from './ui/drawView.js';
 import { createJointPlot } from './ui/jointPlot.js';
 import { isAnatomical } from './ui/armSkin.js';
 import {
-  waveHelloBones, pickupBallBones, filterBones, pickupBallState, PICKUP,
+  waveHelloBones, pickupBallBones, filterBones, pickupBallState, PICKUP, forwardKinematics,
 } from './core/gesture.js';
 
 const GESTURE_PRESET_NAMES = { wave: waveHelloBones, pickup: pickupBallBones };
@@ -354,7 +354,9 @@ const spectrumView = createSpectrumView(spectrumCanvas, store, {});
 // Handle for the browser console and the end-to-end tests: read state, and find
 // where joints and stems are currently drawn.
 window.fourierDemo = {
-  store, armView, spectrumView, gesture: { pickupBallState, PICKUP },
+  store, armView, spectrumView, gesture: {
+    pickupBallState, PICKUP, forwardKinematics,
+  },
 };
 
 // The control-tab arm shows only the band-limited (or actuator-lag-filtered)

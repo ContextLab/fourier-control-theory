@@ -221,7 +221,21 @@ export function createArmView(canvas, store, opts = {}) {
     return { minRe, maxRe, minIm, maxIm, cx, cy, bboxW, bboxH };
   }
 
-  function computeBBoxGesture(bones, fk, kind) {
+  // Gesture mode's autofit is computed ONCE per bone-tree (fit to the
+  // envelope of the WHOLE PERIOD, sampling FK at many t rather than just the
+  // current frame's pose) and cached by bones-array identity, so playback
+  // never re-targets the fit frame to frame — that was the "zoom pumping"
+  // bug (the view chasing the current, constantly-moving pose) and also
+  // what let the shoulder/upper-arm get cut off in wave (a single frame's
+  // pose bbox doesn't necessarily cover the full swing). The cache is
+  // invalidated only when the bones array itself changes identity — a new
+  // preset, or (during/after a drag) updateJointMean's fresh array — so a
+  // drag still eventually re-fits (eased in via updateAutofitGesture below),
+  // just not on every unrelated animation frame.
+  let envelopeCacheBones = null;
+  let envelopeCache = null;
+
+  function computeGestureEnvelope(bones, kind) {
     let minRe = Infinity;
     let maxRe = -Infinity;
     let minIm = Infinity;
@@ -234,13 +248,23 @@ export function createArmView(canvas, store, opts = {}) {
       if (im > maxIm) maxIm = im;
     };
     extend(0, 0);
-    for (const b of bones) {
-      const j = fk.get(b.id);
-      extend(j.tip.re, j.tip.im);
+    const ENVELOPE_SAMPLES = 64;
+    for (let i = 0; i < ENVELOPE_SAMPLES; i += 1) {
+      const t = i / ENVELOPE_SAMPLES;
+      const fk = forwardKinematics(bones, t);
+      for (const b of bones) {
+        const j = fk.get(b.id);
+        extend(j.tip.re, j.tip.im);
+      }
+      if (kind === 'pickup') {
+        const ball = pickupBallState(bones, t);
+        extend(ball.pos.re - PICKUP.ballRadius, ball.pos.im - PICKUP.ballRadius);
+        extend(ball.pos.re + PICKUP.ballRadius, ball.pos.im + PICKUP.ballRadius);
+      }
     }
     if (kind === 'pickup') {
-      extend(PICKUP.ballRestX - 0.15, PICKUP.tableY - 0.05);
-      extend(PICKUP.ballRestX + 0.15, PICKUP.tableY + 0.05);
+      extend(PICKUP.ballRestX - PICKUP.tableHalfWidth, PICKUP.tableY - 0.05);
+      extend(PICKUP.ballRestX + PICKUP.tableHalfWidth, PICKUP.tableY + 0.05);
     }
     let bboxW = Number.isFinite(minRe) ? maxRe - minRe : 0;
     let bboxH = Number.isFinite(minIm) ? maxIm - minIm : 0;
@@ -250,7 +274,19 @@ export function createArmView(canvas, store, opts = {}) {
       bboxW = 1;
       bboxH = 1;
     }
-    return { minRe, maxRe, minIm, maxIm, cx, cy, bboxW, bboxH };
+    const bbox = {
+      minRe, maxRe, minIm, maxIm, cx, cy, bboxW, bboxH,
+    };
+    const totalReach = bones.reduce((s, b) => (MAIN_JOINT_IDS.includes(b.id) ? s + b.length : s), 0);
+    return { bbox, totalReach };
+  }
+
+  function getGestureEnvelope(bones, kind) {
+    if (envelopeCacheBones !== bones) {
+      envelopeCache = computeGestureEnvelope(bones, kind);
+      envelopeCacheBones = bones;
+    }
+    return envelopeCache;
   }
 
   // Every built-in preset normalizes its components' amplitudes to sum to 1
@@ -323,6 +359,32 @@ export function createArmView(canvas, store, opts = {}) {
     justReleased = false;
   }
 
+  /**
+   * Gesture mode's autofit: `bbox` is the whole-period ENVELOPE (see
+   * getGestureEnvelope), not the current frame's pose, so it is already
+   * stable frame to frame during ordinary playback — no per-frame re-target
+   * is needed, just a simple ease toward it (frozen while dragging, snapped
+   * once on first render).
+   */
+  function updateAutofitGesture(bbox, totalReach) {
+    if (!viewInitialized) {
+      const target = fitTargetFromBBox(bbox, totalReach);
+      currentScale = target.scale;
+      currentCenter = target.center;
+      viewInitialized = true;
+      return;
+    }
+    if (dragging) return;
+    const target = fitTargetFromBBox(bbox, totalReach);
+    const ease = justReleased ? 1 : SCALE_EASE;
+    currentScale += (target.scale - currentScale) * ease;
+    currentCenter = {
+      re: currentCenter.re + (target.center.re - currentCenter.re) * ease,
+      im: currentCenter.im + (target.center.im - currentCenter.im) * ease,
+    };
+    justReleased = false;
+  }
+
   function drawJointDot(ctx, tf, p, { fillColor, selected, hovered, label }) {
     const px = tf.toPx(p);
     if (selected) {
@@ -348,12 +410,11 @@ export function createArmView(canvas, store, opts = {}) {
     }
   }
 
-  /** Draw the pick-up-a-ball table line + ball, in world coords. */
-  function drawTableAndBall(ctx, tf, ballState) {
-    const tableHalfWidth = 0.55;
+  /** Draw the pick-up-a-ball table line, in world coords. Drawn BEHIND the arm/hand. */
+  function drawTable(ctx, tf) {
     const y = PICKUP.tableY;
-    const a = tf.toPx({ re: PICKUP.ballRestX - tableHalfWidth, im: y });
-    const b = tf.toPx({ re: PICKUP.ballRestX + tableHalfWidth, im: y });
+    const a = tf.toPx({ re: PICKUP.ballRestX - PICKUP.tableHalfWidth, im: y });
+    const b = tf.toPx({ re: PICKUP.ballRestX + PICKUP.tableHalfWidth, im: y });
     ctx.beginPath();
     ctx.strokeStyle = colors.tableColor;
     ctx.lineWidth = 4;
@@ -372,7 +433,14 @@ export function createArmView(canvas, store, opts = {}) {
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
+  }
 
+  /**
+   * Draw the ball, in world coords. Drawn BETWEEN the main-chain skin and
+   * the finger skin (see renderGesture) so a closed hand's fingers visibly
+   * wrap around it instead of hiding it entirely.
+   */
+  function drawBall(ctx, tf, ballState) {
     const ballPx = tf.toPx(ballState.pos);
     const r = Math.max(4, PICKUP.ballRadius * currentScale);
     const grad = ctx.createRadialGradient(ballPx.x - r * 0.35, ballPx.y - r * 0.35, r * 0.1, ballPx.x, ballPx.y, r);
@@ -401,9 +469,8 @@ export function createArmView(canvas, store, opts = {}) {
     lastT = state.t;
 
     const { pts: mainPts, fk } = gestureMainPoints(bones, state.t);
-    const bbox = computeBBoxGesture(bones, fk, kind);
-    const totalReach = bones.reduce((s, b) => (MAIN_JOINT_IDS.includes(b.id) ? s + b.length : s), 0);
-    updateAutofit(bbox, totalReach);
+    const { bbox, totalReach } = getGestureEnvelope(bones, kind);
+    updateAutofitGesture(bbox, totalReach);
 
     const tf = makeTransform(currentCenter, currentScale);
 
@@ -429,26 +496,30 @@ export function createArmView(canvas, store, opts = {}) {
       canvas.style.cursor = hoverBoneId ? 'grab' : 'default';
     }
 
-    let ballState = null;
-    if (kind === 'pickup') {
-      ballState = pickupBallState(bones, state.t);
-      drawTableAndBall(ctx, tf, ballState);
-    }
+    if (kind === 'pickup') drawTable(ctx, tf);
 
-    // Metallic skin: main chain + real finger chains, all from this FK pass.
+    let ballState = null;
+    if (kind === 'pickup') ballState = pickupBallState(bones, state.t);
+
+    // Metallic skin: main chain (arm+palm) FIRST, then the ball (if any),
+    // then the 5 real finger chains ON TOP — so a closed hand's fingers
+    // visibly wrap around a grasped ball instead of it disappearing inside
+    // an opaque fist.
     if (skinModeFor(state, [{ label: 'gesture' }])) {
       const mainPx = mainPts.map((p) => tf.toPx(p));
       const fingersWorld = fingerWorldPoints(fk);
       const fingersPx = {};
       for (const name of Object.keys(fingersWorld)) fingersPx[name] = fingersWorld[name].map((p) => tf.toPx(p));
       const selectedIndex = MAIN_JOINT_IDS.indexOf(state.selectedId);
+      const skinColors = {
+        skin: colors.skin, skinShade: colors.skinShade, skinHighlight: colors.skinHighlight, outline: colors.skinOutline, bone: colors.textSecondary,
+      };
       drawArmSkin(ctx, mainPx, fingersPx, {
-        scalePx: currentScale,
-        colors: {
-          skin: colors.skin, skinShade: colors.skinShade, skinHighlight: colors.skinHighlight, outline: colors.skinOutline, bone: colors.textSecondary,
-        },
-        xray: true,
-        selectedIndex,
+        scalePx: currentScale, colors: skinColors, xray: true, selectedIndex, parts: 'main',
+      });
+      if (ballState) drawBall(ctx, tf, ballState);
+      drawArmSkin(ctx, mainPx, fingersPx, {
+        scalePx: currentScale, colors: skinColors, parts: 'fingers',
       });
     } else {
       // No-skin fallback: draw the bone chain as plain lines (main + fingers).
@@ -469,6 +540,7 @@ export function createArmView(canvas, store, opts = {}) {
         drawSeg(prev, j.tip, colors.primary);
         prev = j.tip;
       }
+      if (ballState) drawBall(ctx, tf, ballState);
       for (const name of FINGER_NAMES) {
         const chain = [fk.get(`${name}1`), fk.get(`${name}2`), fk.get(`${name}3`)];
         let fprev = chain[0].base;
@@ -529,7 +601,10 @@ export function createArmView(canvas, store, opts = {}) {
         const selected = state.selectedId === id;
         const hovered = interactive && hoverBoneId === id;
         const px = tf.toPx(bone.tip);
-        const r = selected || hovered ? 4.5 : 2.6;
+        // Small: the metal hinge ring (armSkin.js) is the primary "this is a
+        // joint" cue; these colored dots are just a small drag-handle accent
+        // on top of it.
+        const r = selected || hovered ? 4 : 1.8;
         ctx.beginPath();
         ctx.fillStyle = selected ? colors.accent : (bone && GROUP_DOT_COLOR(name));
         ctx.globalAlpha = selected || hovered ? 1 : 0.75;
