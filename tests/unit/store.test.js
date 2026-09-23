@@ -202,7 +202,7 @@ test('duplicate ids in a supplied list are de-duplicated', () => {
 });
 
 test('MAX_FREQ and MAX_AMP and PALETTE are exported', () => {
-  assert.equal(MAX_FREQ, 64);
+  assert.equal(MAX_FREQ, 256);
   assert.equal(MAX_AMP, 5);
   assert.ok(Array.isArray(PALETTE));
   assert.ok(PALETTE.length > 0);
@@ -218,12 +218,40 @@ test('sanitizeComponent rounds freq and clamps it to [-MAX_FREQ, MAX_FREQ]', () 
   assert.equal(sanitizeComponent({ freq: NaN, amp: 0, phase: 0 }).freq, 0);
 });
 
+test('sanitizeComponent rounds freq symmetrically (sign(x)*Math.round(|x|)), not JS round-half-up', () => {
+  // JS's own Math.round(-2.5) is -2 (ties round toward +Infinity); the store must
+  // round the magnitude and reapply the sign so -2.5 mirrors 2.5 exactly.
+  assert.equal(sanitizeComponent({ freq: 2.5, amp: 0, phase: 0 }).freq, 3);
+  assert.equal(sanitizeComponent({ freq: -2.5, amp: 0, phase: 0 }).freq, -3);
+  assert.equal(sanitizeComponent({ freq: -0.5, amp: 0, phase: 0 }).freq, -1);
+});
+
 test('sanitizeComponent clamps amp to [0, MAX_AMP] and maps NaN to 0', () => {
-  assert.equal(sanitizeComponent({ freq: 0, amp: -0.5, phase: 0 }).amp, 0);
   assert.equal(sanitizeComponent({ freq: 0, amp: 370, phase: 0 }).amp, MAX_AMP);
   assert.equal(sanitizeComponent({ freq: 0, amp: NaN, phase: 0 }).amp, 0);
   assert.equal(sanitizeComponent({ freq: 0, amp: Infinity, phase: 0 }).amp, MAX_AMP);
   assert.equal(sanitizeComponent({ freq: 0, amp: 2, phase: 0 }).amp, 2);
+});
+
+test('sanitizeComponent folds a negative amp to |amp| with the phase shifted by pi', () => {
+  // -|c|e^{i phi} === |c|e^{i(phi+pi)}: a negative amplitude is the same point
+  // on the circle as its absolute value with phase rotated by pi.
+  const a = sanitizeComponent({ freq: 0, amp: -0.5, phase: 0 });
+  assert.equal(a.amp, 0.5);
+  assert.ok(Math.abs(a.phase - Math.PI) < 1e-9);
+
+  const b = sanitizeComponent({ freq: 0, amp: -2, phase: Math.PI / 2 });
+  assert.equal(b.amp, 2);
+  assert.ok(Math.abs(b.phase - (-Math.PI / 2)) < 1e-9); // pi/2 + pi wraps to -pi/2
+
+  // A negative amp that overflows MAX_AMP after taking the absolute value still clamps.
+  const c = sanitizeComponent({ freq: 0, amp: -370, phase: 0 });
+  assert.equal(c.amp, MAX_AMP);
+
+  // -Infinity flips to +Infinity, then clamps to MAX_AMP.
+  const d = sanitizeComponent({ freq: 0, amp: -Infinity, phase: 0 });
+  assert.equal(d.amp, MAX_AMP);
+  assert.ok(Math.abs(d.phase - Math.PI) < 1e-9);
 });
 
 test('sanitizeComponent wraps phase to (-pi, pi] and maps NaN to 0', () => {
@@ -258,7 +286,8 @@ test('addComponent, updateComponent, setComponents, and set({components}) all sa
 
   store.updateComponent(id, { amp: -5, freq: 1e6 });
   const updated = store.get().components.find((c) => c.id === id);
-  assert.equal(updated.amp, 0);
+  assert.equal(updated.amp, MAX_AMP); // |-5| clamps to MAX_AMP (5)
+  assert.ok(Math.abs(updated.phase - Math.PI) < 1e-9); // 0 (from the add above) + pi
   assert.equal(updated.freq, MAX_FREQ);
 
   store.setComponents([{ freq: -1e6, amp: NaN, phase: NaN }]);
@@ -266,7 +295,7 @@ test('addComponent, updateComponent, setComponents, and set({components}) all sa
   assert.equal(store.get().components[0].amp, 0);
   assert.equal(store.get().components[0].phase, 0);
 
-  store.set({ components: [{ freq: 100, amp: 8, phase: 0 }] });
+  store.set({ components: [{ freq: MAX_FREQ + 50, amp: 8, phase: 0 }] });
   assert.equal(store.get().components[0].freq, MAX_FREQ);
   assert.equal(store.get().components[0].amp, MAX_AMP);
 });

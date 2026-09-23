@@ -141,6 +141,27 @@ function buildRow(component, store) {
     store.updateComponent(component.id, { phase: value * DEG2RAD }, 'editor');
   });
 
+  // On blur (or Enter/"change"), always resync from the store's sanitized
+  // value — regardless of whether the typed text was valid. This is what
+  // surfaces a clamp/round (1e6 -> MAX_FREQ, -0.5 -> 0.5 with phase+180,
+  // 720deg -> 0deg) once the field loses focus, and reverts unparseable text
+  // ("abc", "1e400") back to the last-good value instead of leaving it blank
+  // or stuck at the rejected text (bindPair's onChange never ran for it, so
+  // the store was never touched and still holds that last-good value).
+  function resyncFromStore() {
+    const current = store.get().components.find((c) => c.id === component.id);
+    if (!current) return;
+    freqInput.value = String(current.freq);
+    freqSlider.value = String(current.freq);
+    ampInput.value = fmtAmp(current.amp);
+    ampSlider.value = fmtAmp(current.amp);
+    phaseInput.value = fmtDeg(current.phase);
+    phaseSlider.value = fmtDeg(current.phase);
+  }
+  freqInput.addEventListener('blur', resyncFromStore);
+  ampInput.addEventListener('blur', resyncFromStore);
+  phaseInput.addEventListener('blur', resyncFromStore);
+
   removeBtn.addEventListener('click', () => {
     const wasSelected = store.get().selectedId === component.id;
     store.removeComponent(component.id, 'editor');
@@ -235,7 +256,11 @@ export function createEditor(container, store) {
   const sortBtn = document.getElementById('sort-by-freq');
   if (sortBtn) {
     sortBtn.addEventListener('click', () => {
-      const sorted = [...store.get().components].sort((a, b) => Math.abs(a.freq) - Math.abs(b.freq));
+      // Signed ascending order (not by |f|): this minimizes the frequency gap
+      // Δf between adjacent links in the chain, which is what keeps adjacent
+      // motor speeds close together. It only changes how the arm bends/moves
+      // (the traced path is order-independent), same as before.
+      const sorted = [...store.get().components].sort((a, b) => a.freq - b.freq);
       store.setComponents(sorted, 'editor');
     });
   }

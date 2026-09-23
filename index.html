@@ -79,7 +79,7 @@
       <div class="control-group">
         <label for="circles-toggle"><input type="checkbox" id="circles-toggle" checked> Circles</label>
       </div>
-      <div class="control-group">
+      <div class="control-group" id="skin-toggle-group" title="Skin is drawn only for the human-arm preset (every component needs a label)">
         <label for="skin-toggle"><input type="checkbox" id="skin-toggle" checked> Show arm skin</label>
       </div>
       <div class="control-group">
@@ -93,11 +93,12 @@
           <option value="sawtooth">Sawtooth</option>
           <option value="star">Star</option>
           <option value="heart">Heart</option>
+          <option value="custom" disabled>Custom</option>
         </select>
       </div>
       <div class="control-group" id="terms-group" style="display:none;" title="Number of Fourier terms used to build the selected shape preset">
         <label for="terms">Terms = <span id="terms-value">6</span></label>
-        <input type="range" id="terms" min="1" max="30" step="1" value="6">
+        <input type="range" id="terms" min="1" max="50" step="1" value="6">
       </div>
     </div>
 
@@ -124,7 +125,7 @@
         <div class="card-header">
           <span class="card-title">Components</span>
           <div class="card-header-actions">
-            <button id="sort-by-freq" class="btn btn-secondary btn-small" title="Reorders the link chain by |frequency| — this changes how the arm bends and moves, not the traced path (the sum, and therefore the path, is order-independent)"><i class="fa-solid fa-arrow-down-short-wide"></i> Sort by |f|</button>
+            <button id="sort-by-freq" class="btn btn-secondary btn-small" title="Reorders the link chain by signed frequency (ascending) — this minimizes the frequency gap Δf between adjacent links, so adjacent motors spin at similar speeds. It changes how the arm bends and moves, not the traced path (the sum, and therefore the path, is order-independent)"><i class="fa-solid fa-arrow-down-short-wide"></i> Sort by f</button>
             <button id="add-component" class="btn btn-secondary btn-small"><i class="fa-solid fa-plus"></i> Add</button>
           </div>
         </div>
@@ -179,9 +180,10 @@
         <div class="card view-canvas-wrap">
           <canvas id="control-arm-canvas" tabindex="0" aria-label="Band-limited or actuator-lag-filtered robot arm reconstruction (not interactive)."></canvas>
         </div>
-        <p class="caption">Same arm, joints numbered 1..N in series order &mdash; think of each as an
-          actuator spinning at a fixed constant velocity (frequency). This view is not interactive; go to
-          the Arm tab to drag joints or spectrum stems.</p>
+        <p class="caption">The filtered arm: joints numbered 1..N in series order, built only from the
+          components that survive the bandwidth (and, when enabled, actuator-lag) filter below &mdash;
+          think of each as an actuator spinning at a fixed constant velocity (frequency). This view is not
+          interactive; go to the Arm tab to drag joints or spectrum stems.</p>
         <div class="control-group" style="margin-bottom:0;">
           <label for="angle-mode">Angles</label>
           <select id="angle-mode" title="Absolute joint angle θ_k, or relative (motor) angle q_k = θ_k − θ_(k-1)">

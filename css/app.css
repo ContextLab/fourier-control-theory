@@ -59,9 +59,17 @@
 
 .view-grid {
   display: grid;
-  grid-template-columns: 2fr 1fr;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
   gap: var(--spacing-lg);
   align-items: stretch;
+}
+
+/* Grid items default to min-width:auto (their min-content size), which can
+   force a track wider than its minmax() ceiling and blow out the grid even
+   though the track itself is correctly sized — the fix has to apply to the
+   item, not just the track. Same story for .draw-layout below. */
+.view-grid > *, .draw-layout > * {
+  min-width: 0;
 }
 
 /* The Components card stretches to match the left column's (canvas + spectrum)
@@ -71,7 +79,15 @@
   flex-direction: column;
   min-height: 0;
 }
-.components-card .card-header-actions { display: flex; gap: var(--spacing-sm); }
+.components-card .card-header-actions { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); }
+
+/* The Control tab's right column (Bandwidth & tracking) has far less content
+   than the left column (arm canvas + joint/spectrum plot), so the grid's
+   default align-items:stretch left a large blank strip below its content.
+   Size it to its own content instead of stretching to match. */
+#panel-control .view-grid > .card {
+  align-self: start;
+}
 
 .view-canvas-wrap canvas {
   display: block;
@@ -218,8 +234,27 @@
 
 /* ============ Responsive ============ */
 
+/* Short viewports (e.g. 1280x720 laptops): the hero + transport + tabs +
+   controls chrome above the arm canvas otherwise pushes it past y=500,
+   leaving barely half a screen for the actual demo. Compact every band of
+   chrome a bit so the canvas lands well within the first screenful. */
+@media (max-height: 800px) {
+  .demo-nav { padding: 6px var(--spacing-xl); }
+  .demo-nav .theme-toggle { width: 34px; height: 34px; font-size: 1.05rem; }
+  body:has(.demo-nav) { padding-top: 48px; }
+  .hero-header { padding: 0.4rem 0 0.35rem; }
+  .hero-title { font-size: 1.3rem; margin-bottom: 0.2rem; }
+  .hero-subtitle { font-size: 0.75rem; max-width: 600px; }
+  .transport-bar-inner { padding: 6px var(--spacing-xl); }
+  .tabs { margin: 6px 0; }
+  .tab-btn { padding: 0.4rem 1rem; }
+  .controls-panel { padding: 10px var(--spacing-lg); gap: var(--spacing-md); }
+  .tab-panel { gap: 10px; }
+  .view-canvas-wrap { padding-top: 10px; }
+}
+
 @media (max-width: 900px) {
-  .view-grid, .draw-layout { grid-template-columns: 1fr; }
+  .view-grid, .draw-layout { grid-template-columns: minmax(0, 1fr); }
   .container { padding: 0 var(--spacing-md) var(--spacing-xl); }
   .components-card { min-height: 0; }
 }

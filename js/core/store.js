@@ -8,7 +8,7 @@ import { sampleSeries, toCoeff } from './fourier.js';
 export const PALETTE = ['#267aba', '#ffa00f', '#a5d75f', '#8a6996', '#d94415', '#f5dc69', '#c4dd88', '#9d162e'];
 
 /** Largest (in magnitude) frequency a component may hold, in cycles/period. */
-export const MAX_FREQ = 64;
+export const MAX_FREQ = 256;
 /** Largest amplitude a component may hold. */
 export const MAX_AMP = 5;
 
@@ -28,24 +28,34 @@ function clamp(x, lo, hi) {
  * Clamp/repair a component's freq/amp/phase so every store entry point holds
  * safe, in-range values regardless of what a drag, editor field, or preset
  * hands in. Other fields (id, color, label, ...) pass through untouched.
- * - freq: rounded to the nearest integer, clamped to [−MAX_FREQ, MAX_FREQ] (NaN → 0;
- *   ±Infinity clamp to ±MAX_FREQ like any other too-large value)
- * - amp: clamped to [0, MAX_AMP] (NaN → 0; +Infinity clamps to MAX_AMP)
- * - phase: finite, wrapped to (−π, π] (NaN or ±Infinity → 0)
+ * - freq: rounded symmetrically (sign(x) * Math.round(|x|), so -2.5 -> -3 just as
+ *   2.5 -> 3, rather than JS's round-half-up), clamped to [−MAX_FREQ, MAX_FREQ]
+ *   (NaN → 0; ±Infinity clamp to ±MAX_FREQ like any other too-large value)
+ * - amp: a negative amplitude is folded to its absolute value with the phase
+ *   shifted by π (same point on the circle, since -|c|e^{iφ} = |c|e^{i(φ+π)}),
+ *   then clamped to [0, MAX_AMP] (NaN → 0; +Infinity clamps to MAX_AMP)
+ * - phase: finite, wrapped to (−π, π] (NaN or ±Infinity → 0 before any amp-flip
+ *   shift is added)
  * @param {object} c
  * @returns {object}
  */
 export function sanitizeComponent(c) {
-  let freq = Math.round(Number(c.freq));
-  if (Number.isNaN(freq)) freq = 0;
+  let freq = Number(c.freq);
+  freq = Number.isNaN(freq) ? 0 : Math.sign(freq) * Math.round(Math.abs(freq));
   freq = clamp(freq, -MAX_FREQ, MAX_FREQ);
 
   let amp = Number(c.amp);
   if (Number.isNaN(amp)) amp = 0;
-  amp = clamp(amp, 0, MAX_AMP);
 
   let phase = Number(c.phase);
-  phase = Number.isFinite(phase) ? wrapPhase(phase) : 0;
+  phase = Number.isFinite(phase) ? phase : 0;
+
+  if (amp < 0) {
+    amp = -amp;
+    phase += Math.PI;
+  }
+  amp = clamp(amp, 0, MAX_AMP);
+  phase = wrapPhase(phase);
 
   return { ...c, freq, amp, phase };
 }

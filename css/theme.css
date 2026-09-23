@@ -299,6 +299,8 @@ input:disabled { opacity: 0.45; cursor: not-allowed; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  row-gap: var(--spacing-sm);
   gap: var(--spacing-md);
 }
 

@@ -1,12 +1,15 @@
 // Freehand draw capture + 3Blue1Brown-style epicycle reconstruction animation.
 import { setupCanvas, makeTransform, cssVar } from './canvas.js';
-import { resampleArcLength, dft, idftEval, topK, fromCoeff } from '../core/fourier.js';
+import { resampleArcLength, dft, idftEval, fromCoeff } from '../core/fourier.js';
 import { jointPositions } from '../core/arm.js';
 
 const PALETTE = ['#267aba', '#ffa00f', '#a5d75f', '#8a6996', '#d94415', '#f5dc69', '#c4dd88', '#9d162e'];
-export const K_MIN = 1;
-export const K_MAX = 512;
 const RESAMPLE_N = 512;
+export const K_MIN = 1;
+// K counts ROTATING (non-DC) components only; the DC term (if any) is always
+// included on top of that, so the true ceiling is one less than the total
+// number of DFT bins.
+export const K_MAX = RESAMPLE_N - 1;
 const TRAIL_POINTS = 240;
 // A finished stroke shorter than this (in points, or in pixel bounding-box
 // extent) is treated as an accidental tap/click rather than a real drawing:
@@ -25,6 +28,23 @@ export function sliderToK(pos, min, max) {
   const t = max > min ? Math.max(0, Math.min(1, (pos - min) / (max - min))) : 0;
   const k = Math.round(Math.exp(Math.log(K_MIN) + t * (Math.log(K_MAX) - Math.log(K_MIN))));
   return Math.min(K_MAX, Math.max(K_MIN, k));
+}
+
+/**
+ * Like core/fourier.js's topK, but K counts only the ROTATING (non-DC)
+ * components; the DC term (if present) is always kept on top of that. This
+ * is what makes K=1 render as one spinning epicycle instead of a single
+ * motionless dot (plain topK(coeffs, 1) would spend that one slot on DC).
+ * @param {Array<{freq:number, c:{re:number,im:number}}>} coeffs
+ * @param {number} K
+ */
+function topKWithDC(coeffs, K) {
+  const dc = coeffs.filter((entry) => entry.freq === 0);
+  const rest = coeffs
+    .filter((entry) => entry.freq !== 0)
+    .slice()
+    .sort((a, b) => Math.hypot(b.c.re, b.c.im) - Math.hypot(a.c.re, a.c.im));
+  return [...dc, ...rest.slice(0, Math.max(0, K))];
 }
 
 /**
@@ -109,7 +129,7 @@ export function createDrawView(canvas, store) {
       return;
     }
     const K = Math.max(K_MIN, Math.min(K_MAX, state.K));
-    const topCoeffs = topK(drawing.coeffs, K);
+    const topCoeffs = topKWithDC(drawing.coeffs, K);
     let sumSq = 0;
     for (let n = 0; n < RESAMPLE_N; n += 1) {
       const t = n / RESAMPLE_N;
@@ -257,7 +277,7 @@ export function createDrawView(canvas, store) {
     const state = store.get();
     if (!state.drawing.coeffs || state.drawing.coeffs.length === 0) return;
     const K = Math.max(K_MIN, Math.min(K_MAX, state.K));
-    const topCoeffs = topK(state.drawing.coeffs, K);
+    const topCoeffs = topKWithDC(state.drawing.coeffs, K);
     // Guard against NaN: fromCoeff can only produce a non-finite freq/amp/
     // phase if the source coefficients are already broken upstream, but the
     // arm view/editor have no NaN handling of their own, so filter here
@@ -320,7 +340,7 @@ export function createDrawView(canvas, store) {
     let reconComponents = [];
     let chain = null;
     if (hasCoeffs) {
-      const topCoeffs = topK(drawing.coeffs, K);
+      const topCoeffs = topKWithDC(drawing.coeffs, K);
       reconComponents = topCoeffs.map((c, i) => ({ ...fromCoeff(c, {}), color: paletteColor(i) }));
       chain = jointPositions(reconComponents, state.t, { re: 0, im: 0 });
     }

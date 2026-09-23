@@ -1,0 +1,6 @@
+# Round 2 math/text (2026-09-23)
+HIGH 1 tutorial 260-263 §2.6 Try-this fails: θ panel plots unfiltered comps; lag shifts θ by arg H & shrinks links; slope unchanged. Fix: plot filtered angles (Control shows filtered arm) & describe offset/shrink, not flatten.
+MED 2 drawView 256-270 Send-to-Arm K>~128 corrupt: MAX_FREQ=64 clamps. Fix: raise MAX_FREQ to 256 (N=512 DFT range) — check perf ticks capped — or cap K.
+MED 3 tutorial:169 "corners sharpen with no ringing" -> small ripples shrinking to 0 (unlike Gibbs ~9%).
+MED 4 tutorial 295-296: sort by |f| gives Δf large; signed sort gives small Δf. Change button to signed sort ("Sort by f") or fix text.
+LOW 5 jointPlot:301 asymmetric ticks (Math.round). 6 app.js:249 control arm colours PALETTE[i] mismatch; use source comp colour. 7 tutorial:57-58, README 40-41 |H| overlay always drawn; README:104 "mini Bode"; README:105 presets menu in app.js not editor.js. 8 390px jointPlot titles overlap (lines 227,312). 9 wording: tutorial 272-274 garbled; :383 irrelevant §3.1 ref; index.html:167 "Same arm" -> filtered arm; :167 Try-this under §1.6 not §1.5; :141 "square wave's edge" -> "square's corner"; K=1 draw shows only DC dot (K min should give ≥1 rotating comp: exclude/force DC separately); "exactly"x5 "simply"x3. 10 sanitize amp<0 -> |amp| with phase+π; Math.round(-2.5) = -2 (use sign*round(abs)).

@@ -92,11 +92,11 @@ export function preset(name, n = 15) {
       // a natural, relaxed reach with loosely curled fingers. Amplitudes
       // already sum to 1.
       return [
-        { label: 'Upper arm', freq: 1, amp: 0.36, phase: -0.1 },
-        { label: 'Forearm', freq: 2, amp: 0.3, phase: -0.35 },
-        { label: 'Hand', freq: -3, amp: 0.16, phase: -0.7 },
-        { label: 'Finger', freq: 4, amp: 0.11, phase: -1.05 },
-        { label: 'Fingertip', freq: -5, amp: 0.07, phase: -1.5 },
+        { label: 'Upper arm', freq: 1, amp: 0.34, phase: -0.1 },
+        { label: 'Forearm', freq: 2, amp: 0.29, phase: -0.35 },
+        { label: 'Hand', freq: -3, amp: 0.15, phase: -0.7 },
+        { label: 'Finger', freq: 4, amp: 0.13, phase: -1.05 },
+        { label: 'Fingertip', freq: -5, amp: 0.09, phase: -1.5 },
       ];
     case 'circle':
       return normalize([{ freq: 1, amp: 1, phase: 0 }]);

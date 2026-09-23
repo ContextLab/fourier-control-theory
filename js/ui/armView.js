@@ -30,7 +30,11 @@ export function createArmView(canvas, store, opts = {}) {
   } = opts;
 
   const cv = setupCanvas(canvas);
-  if (interactive) canvas.style.touchAction = 'none';
+  // 'none' would block page scrolling on touch entirely. Allow vertical pan +
+  // pinch-zoom by default; onTouchStart below cancels that per-gesture (via
+  // preventDefault, since touch-action can't change mid-gesture) only when
+  // the touch actually starts on a joint, so joint-dragging still works.
+  if (interactive) canvas.style.touchAction = 'pan-y pinch-zoom';
   if (!canvas.hasAttribute('role')) canvas.setAttribute('role', 'img');
   if (!canvas.hasAttribute('aria-label')) {
     canvas.setAttribute('aria-label', 'Animated robot-arm / Fourier-epicycle diagram');
@@ -128,11 +132,24 @@ export function createArmView(canvas, store, opts = {}) {
     return { minRe, maxRe, minIm, maxIm, cx, cy, bboxW, bboxH };
   }
 
+  // Every built-in preset normalizes its components' amplitudes to sum to 1
+  // (see core/presets.js), so a component list's total reach (sum of |amp|)
+  // is a stable proxy for "how big the arm itself is" regardless of how much
+  // bigger the full swept path is. Flooring the scale relative to that reach
+  // keeps a normal 5-bone arm (or similar) from shrinking to the point where
+  // adjacent joints visually overlap, even when the path bbox is huge.
+  const MIN_REACH_FRACTION = 0.32; // fraction of the canvas's smaller dimension
+
   /** Auto-fit target (scale + center) for a bbox, with an 8%-of-canvas margin. */
-  function fitTargetFromBBox(bbox) {
+  function fitTargetFromBBox(bbox, components) {
     const availW = Math.max(1, cv.w * (1 - 2 * FIT_MARGIN));
     const availH = Math.max(1, cv.h * (1 - 2 * FIT_MARGIN));
-    const scale = Math.min(availW / Math.max(bbox.bboxW, 1e-6), availH / Math.max(bbox.bboxH, 1e-6));
+    let scale = Math.min(availW / Math.max(bbox.bboxW, 1e-6), availH / Math.max(bbox.bboxH, 1e-6));
+    const totalReach = (components || []).reduce((s, c) => s + Math.abs(c.amp), 0);
+    if (totalReach > 1e-6) {
+      const minScale = (Math.min(cv.w, cv.h) * MIN_REACH_FRACTION) / totalReach;
+      scale = Math.max(scale, minScale);
+    }
     return { scale, center: { re: bbox.cx, im: bbox.cy } };
   }
 
@@ -162,6 +179,15 @@ export function createArmView(canvas, store, opts = {}) {
     return false;
   }
 
+  // Set right when a drag ends (onPointerUp), consumed on the very next
+  // render: if that release left the arm/path actually overflowing the
+  // canvas (e.g. a shift-lengthen that grew a bone a lot), snap the autofit
+  // to its target immediately instead of the normal slow per-frame ease, so
+  // the arm doesn't visibly sit clipped at the edge for the ~15-20 frames
+  // SCALE_EASE would otherwise take to converge. Ordinary in-bounds pose
+  // changes never overflow, so this never fires for them.
+  let justReleased = false;
+
   function render(state, derived) {
     const { ctx, w, h } = cv;
     const components = currentComponents(state) || [];
@@ -177,7 +203,7 @@ export function createArmView(canvas, store, opts = {}) {
 
     const bbox = computeBBox(components, state, derived);
     if (!viewInitialized) {
-      const target = fitTargetFromBBox(bbox);
+      const target = fitTargetFromBBox(bbox, components);
       currentScale = target.scale;
       currentCenter = target.center;
       viewInitialized = true;
@@ -188,15 +214,22 @@ export function createArmView(canvas, store, opts = {}) {
       // release, even for a small, in-frame adjustment. Only re-fit for a
       // drag-sourced change if it actually pushed the arm/path out of view;
       // any other source (preset, editor, draw, spectrum) always re-fits.
-      const shouldRefit = lastComponentsSource !== 'arm' || overflowsCanvas(bbox);
+      const overflowed = overflowsCanvas(bbox);
+      const shouldRefit = lastComponentsSource !== 'arm' || overflowed;
       if (shouldRefit) {
-        const target = fitTargetFromBBox(bbox);
-        currentScale += (target.scale - currentScale) * SCALE_EASE;
+        const target = fitTargetFromBBox(bbox, components);
+        // A drag that ended with the arm/path actually overflowing gets an
+        // immediate snap instead of the normal slow ease (see justReleased
+        // above); every other refit (including a drag that stayed in view)
+        // keeps the smooth per-frame ease.
+        const ease = (justReleased && overflowed) ? 1 : SCALE_EASE;
+        currentScale += (target.scale - currentScale) * ease;
         currentCenter = {
-          re: currentCenter.re + (target.center.re - currentCenter.re) * SCALE_EASE,
-          im: currentCenter.im + (target.center.im - currentCenter.im) * SCALE_EASE,
+          re: currentCenter.re + (target.center.re - currentCenter.re) * ease,
+          im: currentCenter.im + (target.center.im - currentCenter.im) * ease,
         };
       }
+      justReleased = false;
     }
 
     const tf = makeTransform(currentCenter, currentScale);
@@ -368,15 +401,35 @@ export function createArmView(canvas, store, opts = {}) {
     const components = currentComponents(state) || [];
     const tf = makeTransform(currentCenter, currentScale);
     const pts = jointPositions(components, state.t, { re: 0, im: 0 });
-    let best = -1;
-    let bestDist = HIT_RADIUS;
+    const ptsPx = pts.map((p) => tf.toPx(p));
+    const candidates = [];
+    let minDist = Infinity;
     for (let i = 0; i < components.length; i++) {
-      const p = tf.toPx(pts[i + 1]);
-      const d = Math.hypot(p.x - px, p.y - py);
-      if (d <= bestDist) {
-        bestDist = d;
-        best = i;
+      const p = ptsPx[i + 1];
+      // Adaptive hit radius: when joints are bunched close together, a fixed
+      // 12px radius makes several joints compete for the same click and can
+      // leave one (e.g. a middle joint boxed in on both sides) ungrabbable.
+      // Shrink toward half the distance to the nearest other joint, but never
+      // below 6px so a truly isolated joint keeps a comfortable hit area.
+      let nearestOther = Infinity;
+      for (let j = 0; j < ptsPx.length; j++) {
+        if (j === i + 1) continue;
+        const d = Math.hypot(ptsPx[j].x - p.x, ptsPx[j].y - p.y);
+        if (d < nearestOther) nearestOther = d;
       }
+      const radius = Math.max(6, Math.min(HIT_RADIUS, nearestOther / 2));
+      const d = Math.hypot(p.x - px, p.y - py);
+      if (d > radius) continue;
+      candidates.push({ i, d });
+      if (d < minDist) minDist = d;
+    }
+    // Prefer the most distal joint that's closest: a clearly smaller distance
+    // always wins, but among candidates within ~1px of the closest one,
+    // prefer the higher (more distal) index, matching draw order (distal
+    // joints are painted last, i.e. on top).
+    let best = -1;
+    for (const c of candidates) {
+      if (c.d <= minDist + 1 && c.i > best) best = c.i;
     }
     return best;
   }
@@ -440,10 +493,26 @@ export function createArmView(canvas, store, opts = {}) {
     onPointerMoveHover(evt);
   }
 
+  /**
+   * touch-action can't be changed mid-gesture, so this non-passive listener
+   * cancels the browser's default pan only when the touch actually starts on
+   * a joint (so that gesture drags instead of scrolling); any other touch on
+   * the canvas is left alone and the page scrolls normally.
+   */
+  function onTouchStart(evt) {
+    if (!interactive || componentsOverride) return;
+    const touch = evt.touches && evt.touches[0];
+    if (!touch) return;
+    const { x, y } = localXY(touch);
+    const state = store.get();
+    if (hitTestJoint(x, y, state) >= 0) evt.preventDefault();
+  }
+
   function onPointerUp(evt) {
     if (dragging && dragging.pointerId === evt.pointerId) {
       try { canvas.releasePointerCapture(evt.pointerId); } catch { /* noop */ }
       dragging = null;
+      justReleased = true;
       store.set({ dragging: false }, 'arm');
       canvas.style.cursor = hoverK >= 0 ? 'grab' : 'default';
     }
@@ -454,6 +523,7 @@ export function createArmView(canvas, store, opts = {}) {
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('pointercancel', onPointerUp);
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
     canvas.addEventListener('pointerleave', () => {
       if (!dragging) {
         hoverK = -1;
@@ -475,6 +545,7 @@ export function createArmView(canvas, store, opts = {}) {
       canvas.removeEventListener('pointermove', onPointerMove);
       canvas.removeEventListener('pointerup', onPointerUp);
       canvas.removeEventListener('pointercancel', onPointerUp);
+      canvas.removeEventListener('touchstart', onTouchStart);
     }
     cv.destroy();
   }

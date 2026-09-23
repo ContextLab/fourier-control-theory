@@ -20,7 +20,8 @@ import { fileURLToPath } from 'node:url';
 // within sliderToK itself) — used to invert the draw view's log-scale K
 // slider mapping so tests can set an exact target K without duplicating or
 // guessing at drawView.js's internal formula.
-import { sliderToK } from '../../js/ui/drawView.js';
+import { sliderToK, K_MAX } from '../../js/ui/drawView.js';
+import { idftEval } from '../../js/core/fourier.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCREENS_DIR = path.join(__dirname, 'screens');
@@ -363,12 +364,18 @@ test('draw mode: a tiny/degenerate stroke is rejected with a hint, not NaN', asy
 // changing concurrently; run the full suite once everyone's work has landed.
 // ---------------------------------------------------------------------------
 
-const MAX_FREQ = 64; // js/core/store.js contract (owner: E)
-const MAX_AMP = 5; // js/core/store.js contract (owner: E)
+// js/core/store.js is the single source of truth for these limits (owner: F)
+// and they've changed over the course of red-teaming (64 -> 256), so read
+// them from the live module instead of hardcoding a number here that would
+// silently drift out of sync and either weaken or spuriously fail the test.
+async function getLimits(page) {
+  return page.evaluate(() => import('/js/core/store.js').then((m) => ({ MAX_FREQ: m.MAX_FREQ, MAX_AMP: m.MAX_AMP })));
+}
 
-test('spectrum: dragging a stem far past the right edge keeps |freq| <= 64', async ({ page }) => {
+test('spectrum: dragging a stem far past the right edge keeps |freq| within MAX_FREQ', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
+  const { MAX_FREQ } = await getLimits(page);
   const box = await pauseAndBox(page, '#spectrum-canvas');
   const heads = await page.evaluate(() => window.fourierDemo.spectrumView.stemHeads());
   const h = heads[0];
@@ -400,9 +407,10 @@ test('spectrum: dragging a stem far past the right edge keeps |freq| <= 64', asy
   expect(Math.abs(comp.freq)).toBeLessThanOrEqual(MAX_FREQ);
 });
 
-test('arm: shift-dragging a joint far off-canvas keeps amp <= 5', async ({ page }) => {
+test('arm: shift-dragging a joint far off-canvas keeps amp within MAX_AMP', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
+  const { MAX_AMP } = await getLimits(page);
   const box = await pauseAndBox(page, '#arm-canvas');
   const joints = await page.evaluate(() => window.fourierDemo.armView.jointsPx());
   const tip = joints[1];
@@ -422,9 +430,10 @@ test('arm: shift-dragging a joint far off-canvas keeps amp <= 5', async ({ page 
   }
 });
 
-test('editor: freq input of 1e6 is clamped to |freq| <= 64 and frame time stays reasonable', async ({ page }) => {
+test('editor: freq input of 1e6 is clamped within MAX_FREQ and frame time stays reasonable', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
+  const { MAX_FREQ } = await getLimits(page);
   const freqInput = page.locator('#editor .editor-row').first().locator('input[type="number"]').first();
   await expect(freqInput).toBeVisible();
   await freqInput.fill('1000000');
@@ -530,4 +539,156 @@ test('perf smoke: 150 components keep median frame time under 20ms', async ({ pa
   const sorted = [...frameDeltas].sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
   expect(median, `median frame time was ${median}ms with ~${targetCount} components`).toBeLessThan(20);
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 red-team fixes (notes/redteam/{r2-func,r2-math-text,fix-plan}.md)
+// ---------------------------------------------------------------------------
+
+test('mobile 390px: no element in the Arm panel is wider than the viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const errors = await gotoApp(page);
+  expect(errors).toEqual([]);
+  await page.click('#tab-arm');
+  await page.waitForTimeout(150);
+
+  const overflowing = await page.evaluate(() => {
+    const vw = document.documentElement.clientWidth;
+    const out = [];
+    document.querySelectorAll('#panel-arm *').forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.right > vw + 1) {
+        out.push({ tag: el.tagName, cls: String(el.className).slice(0, 60), right: Math.round(r.right), vw });
+      }
+    });
+    return out;
+  });
+  expect(overflowing, `elements wider than the viewport:\n${JSON.stringify(overflowing, null, 2)}`).toEqual([]);
+
+  // The Add button and captions must actually be visible once scrolled to,
+  // not just narrower than the viewport (e.g. clipped by an ancestor's
+  // overflow:hidden instead).
+  const addBtn = page.locator('#add-component');
+  await addBtn.scrollIntoViewIfNeeded();
+  await expect(addBtn).toBeVisible();
+  await expect(addBtn).toBeInViewport();
+  await expect(page.locator('#panel-arm .caption').first()).toBeVisible();
+});
+
+test('editor: blur re-patches the freq input to the sanitized store value (1e6 -> MAX_FREQ)', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-arm');
+  const { MAX_FREQ } = await getLimits(page);
+  const freqInput = page.locator('#editor .editor-row').first().locator('input[type="number"]').first();
+  await freqInput.fill('1000000');
+  await freqInput.dispatchEvent('input');
+  await freqInput.blur();
+  await page.waitForTimeout(100);
+
+  expect(await freqInput.inputValue()).toBe(String(MAX_FREQ));
+  const freq = await page.evaluate(() => window.fourierDemo.store.get().components[0].freq);
+  expect(freq).toBe(MAX_FREQ);
+});
+
+test('editor: non-finite text (1e400) reverts to the current value on blur instead of going blank', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-arm');
+  const freqInput = page.locator('#editor .editor-row').first().locator('input[type="number"]').first();
+  const before = await freqInput.inputValue();
+
+  await freqInput.fill('1e400');
+  await freqInput.dispatchEvent('input');
+  await freqInput.blur();
+  await page.waitForTimeout(100);
+
+  expect(await freqInput.inputValue()).toBe(before);
+  const freq = await page.evaluate(() => window.fourierDemo.store.get().components[0].freq);
+  expect(Number.isFinite(freq), `freq must stay finite, got ${freq}`).toBe(true);
+});
+
+test('preset select shows "Custom" once a manual edit diverges from the chosen preset', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-arm');
+
+  await page.selectOption('#presets', 'circle');
+  await page.waitForTimeout(100);
+  expect(await page.locator('#presets').inputValue()).toBe('circle');
+
+  const freqInput = page.locator('#editor .editor-row').first().locator('input[type="number"]').first();
+  const current = parseFloat(await freqInput.inputValue());
+  await freqInput.fill(String(current + 1));
+  await freqInput.dispatchEvent('input');
+  await page.waitForTimeout(100);
+
+  expect(await page.locator('#presets').inputValue()).toBe('custom');
+});
+
+test('skin checkbox is disabled (with a tooltip) for a non-anatomical preset', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-arm');
+  const skin = page.locator('#skin-toggle');
+  // Default preset is the human arm: anatomical, so enabled.
+  expect(await skin.isDisabled()).toBe(false);
+
+  await page.selectOption('#presets', 'circle');
+  await page.waitForTimeout(100);
+  expect(await skin.isDisabled()).toBe(true);
+  const title = await skin.getAttribute('title');
+  expect(title && title.length > 0, 'disabled skin checkbox must have an explanatory tooltip').toBeTruthy();
+
+  await page.selectOption('#presets', 'arm');
+  await page.waitForTimeout(100);
+  expect(await skin.isDisabled()).toBe(false);
+});
+
+test('control tab: toggling actuator lag visibly changes the theta panel', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-control');
+  await page.waitForTimeout(200);
+
+  const before = await page.locator('#joint-canvas').screenshot();
+  await page.check('#feedback-toggle');
+  await page.waitForTimeout(200);
+  const after = await page.locator('#joint-canvas').screenshot();
+
+  expect(Buffer.compare(before, after), 'theta panel pixels must change when actuator lag is toggled on').not.toBe(0);
+});
+
+test('draw mode: Send to Arm at K=max reproduces the drawn path', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-draw');
+  await page.waitForTimeout(150);
+  await drawStarOnCanvas(page);
+  await expectFiniteCoeffs(page);
+
+  const kSlider = page.locator('#k-slider');
+  const maxPos = await page.evaluate(() => Number(document.getElementById('k-slider').max) || 1000);
+  await kSlider.fill(String(maxPos));
+  await kSlider.dispatchEvent('input');
+  await page.waitForTimeout(100);
+  expect(await page.locator('#k-value').textContent()).toBe(String(K_MAX));
+
+  const coeffs = await page.evaluate(() => window.fourierDemo.store.get().drawing.coeffs);
+
+  await page.click('#send-to-arm');
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => window.fourierDemo.store.get().mode)).toBe('arm');
+
+  const armPath = await page.evaluate(() => Array.from(window.fourierDemo.store.derived().path));
+  const M = armPath.length / 2;
+
+  // At K=max every non-DC coefficient survives (plus DC), so the arm's
+  // reconstruction should closely match the ORIGINAL drawing's own full-coeff
+  // IDFT (sum is order-independent, so this is exactly what Send-to-Arm's
+  // topKWithDC(coeffs, K_MAX) produced) sampled at the same resolution.
+  let sumSq = 0;
+  for (let n = 0; n < M; n += 1) {
+    const t = n / M;
+    const recon = idftEval(coeffs, t);
+    const dx = recon.re - armPath[2 * n];
+    const dy = recon.im - armPath[2 * n + 1];
+    sumSq += dx * dx + dy * dy;
+  }
+  const rms = Math.sqrt(sumSq / M);
+  expect(rms, `RMS between drawn path and Send-to-Arm(K=max) arm path was ${rms}`).toBeLessThan(0.01);
 });

@@ -7,6 +7,7 @@ import { createSpectrumView } from './ui/spectrumView.js';
 import { createEditor } from './ui/editor.js';
 import { createDrawView } from './ui/drawView.js';
 import { createJointPlot } from './ui/jointPlot.js';
+import { isAnatomical } from './ui/armSkin.js';
 
 // ---------- Theme ----------
 
@@ -172,14 +173,70 @@ if (skinEl) {
   });
 }
 
+// The skin is only ever drawn over the anatomical human-arm preset (every
+// component needs a `label`); disable the checkbox (with an explanatory
+// tooltip) whenever the current components aren't anatomical, so it can't be
+// checked-but-inert.
+const skinToggleGroupEl = document.getElementById('skin-toggle-group');
+function syncSkinToggleEnabled(state) {
+  if (!skinEl) return;
+  const anatomical = isAnatomical(state.components);
+  skinEl.disabled = !anatomical;
+  const title = anatomical
+    ? 'Draws a stylized human-arm skin over the current (anatomical) link chain'
+    : 'Skin is drawn only for the human-arm preset (every component needs a label)';
+  skinEl.title = title;
+  if (skinToggleGroupEl) skinToggleGroupEl.title = title;
+}
+store.subscribe((state) => syncSkinToggleEnabled(state), ['components']);
+syncSkinToggleEnabled(store.get());
+
+// Track which built-in preset (and, for shape presets, which term count) the
+// current components were last set to exactly match, so any later change —
+// a drag, an editor edit, Send-to-Arm, a sort — that makes the live
+// components diverge from it can flip the Preset select to "Custom".
+let lastPresetName = 'arm';
+let lastPresetTerms;
+
+function componentsMatchPreset(components, name, terms) {
+  let ref;
+  try {
+    ref = name === 'arm' ? preset('arm') : preset(name, terms);
+  } catch (err) {
+    return false;
+  }
+  if (!ref || ref.length !== components.length) return false;
+  const EPS = 1e-6;
+  return components.every((c, i) => (
+    Math.abs(c.freq - ref[i].freq) < EPS
+    && Math.abs(c.amp - ref[i].amp) < EPS
+    && Math.abs(c.phase - ref[i].phase) < EPS
+  ));
+}
+
+function syncPresetSelect(state) {
+  if (componentsMatchPreset(state.components, lastPresetName, lastPresetTerms)) {
+    if (presetsEl.value !== lastPresetName) presetsEl.value = lastPresetName;
+  } else if (presetsEl.value !== 'custom') {
+    presetsEl.value = 'custom';
+  }
+}
+store.subscribe((state, changedKeys, source) => {
+  if (source === 'presets') return; // applyPreset() below already set the select itself
+  syncPresetSelect(state);
+}, ['components']);
+
 function applyPreset() {
   const name = presetsEl.value;
-  if (!name) return;
-  const n = name === 'arm' ? undefined : Math.max(1, Math.min(30, parseInt(termsEl.value, 10) || 6));
+  if (!name || name === 'custom') return;
+  const n = name === 'arm' ? undefined : Math.max(1, Math.min(50, parseInt(termsEl.value, 10) || 6));
+  lastPresetName = name;
+  lastPresetTerms = n;
   store.setComponents(preset(name, n), 'presets');
 }
 
 presetsEl.addEventListener('change', () => {
+  if (presetsEl.value === 'custom') return;
   if (termsGroupEl) {
     termsGroupEl.style.display = presetsEl.value && presetsEl.value !== 'arm' ? 'flex' : 'none';
   }
@@ -189,7 +246,7 @@ presetsEl.addEventListener('change', () => {
 if (termsEl) {
   termsEl.addEventListener('input', () => {
     if (termsValueEl) termsValueEl.textContent = termsEl.value;
-    if (presetsEl.value && presetsEl.value !== 'arm') applyPreset();
+    if (presetsEl.value && presetsEl.value !== 'arm' && presetsEl.value !== 'custom') applyPreset();
   });
 }
 
@@ -198,7 +255,14 @@ addComponentBtn.addEventListener('click', () => {
   const usedFreqs = new Set(components.map((c) => c.freq));
   let freq = 1;
   while (usedFreqs.has(freq)) freq += 1;
-  const id = store.addComponent({ freq, amp: 0.2, phase: 0 });
+  const partial = { freq, amp: 0.2, phase: 0 };
+  // Adding a bare (unlabeled) component to the anatomical human arm would
+  // silently break isAnatomical() and drop the skin. Give it a label of its
+  // own so it reads as an extra bone and the skin keeps drawing.
+  if (isAnatomical(components)) {
+    partial.label = `Extra bone ${components.length + 1}`;
+  }
+  const id = store.addComponent(partial);
   store.set({ selectedId: id }, 'editor');
 });
 
@@ -238,7 +302,7 @@ window.fourierDemo = { store, armView, spectrumView };
 function bandLimitedComponents() {
   const state = store.get();
   const derived = store.derived();
-  const entries = Array.from(derived.spectrum.entries()).map(([freq, v]) => ({ freq, c: v.sum }));
+  const entries = Array.from(derived.spectrum.entries()).map(([freq, v]) => ({ freq, c: v.sum, ids: v.ids }));
   const feedbackEl = document.getElementById('feedback-toggle');
   const fcEl = document.getElementById('fc-slider');
   const useLag = feedbackEl && feedbackEl.checked;
@@ -246,7 +310,19 @@ function bandLimitedComponents() {
   // on top of it (both filters stack rather than being mutually exclusive).
   const bandLimited = entries.filter((e) => Math.abs(e.freq) <= state.bandwidth);
   const filtered = useLag ? lowpass(bandLimited, Math.max(0.01, parseFloat(fcEl.value))) : bandLimited;
-  return filtered.map((c, i) => fromCoeff(c, { id: `bw-${i}`, color: PALETTE[i % PALETTE.length] }));
+  // lowpass() only carries {freq, c} through (it drops `ids`), so look each
+  // surviving bucket's display color back up by freq — from the source
+  // component(s) that fed it — rather than a positional PALETTE[i], which
+  // would relabel colors every time components enter/leave the passband.
+  const colorByFreq = new Map();
+  for (const e of bandLimited) {
+    const src = state.components.find((c) => c.id === e.ids[0]);
+    if (src) colorByFreq.set(e.freq, src.color);
+  }
+  return filtered.map((c, i) => fromCoeff(c, {
+    id: `bw-${i}`,
+    color: colorByFreq.get(c.freq) || PALETTE[i % PALETTE.length],
+  }));
 }
 const controlArmView = createArmView(controlArmCanvas, store, {
   interactive: false,
@@ -288,7 +364,10 @@ function frame(ts) {
     drawView.render(renderState, derived);
   } else if (renderState.mode === 'control') {
     controlArmView.render(renderState, derived);
-    jointPlot.render(renderState, derived);
+    // The theta panel plots the FILTERED arm (same components the control
+    // arm canvas actually draws) so turning actuator lag on visibly offsets
+    // angles by arg H, rather than silently ignoring the filter.
+    jointPlot.render(renderState, derived, bandLimitedComponents());
   }
 
   requestAnimationFrame(frame);

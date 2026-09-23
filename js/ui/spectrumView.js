@@ -57,7 +57,11 @@ export function createSpectrumView(canvas, store, opts = {}) {
   );
   if (interactive) {
     canvas.tabIndex = 0;
-    canvas.style.touchAction = 'none';
+    // 'none' would block page scrolling on touch entirely. Allow vertical pan
+    // + pinch-zoom by default; onTouchStart below cancels that per-gesture
+    // (via preventDefault, since touch-action can't change mid-gesture) only
+    // when the touch actually starts on a stem/head/ring, so those still drag.
+    canvas.style.touchAction = 'pan-y pinch-zoom';
     canvas.style.outline = 'none';
   }
 
@@ -418,6 +422,11 @@ export function createSpectrumView(canvas, store, opts = {}) {
         // gesture earlier in the same drag.
         origAmp: head.comp.amp,
         origPhase: head.comp.phase,
+        // Grab offset (pointer y minus head y at pointerdown): grabbing the
+        // stem's line rather than its head starts with a nonzero offset, and
+        // applying it on every move keeps amp changes relative to the grab
+        // point instead of snapping the head straight to the pointer.
+        grabDy: y - head.py,
       };
       canvas.style.cursor = 'grabbing';
       canvas.setPointerCapture(evt.pointerId);
@@ -473,11 +482,13 @@ export function createSpectrumView(canvas, store, opts = {}) {
     }
 
     // mode === 'move'. The x-range (layout.F) is frozen by computeLayout
-    // while `dragging` is set, and freqInt is clamped to MAX_FREQ here (in
-    // addition to the store's own sanitizeComponent) so the displayed value
-    // can't run away even if the pointer is dragged far past the canvas edge.
+    // while `dragging` is set; freqInt is clamped both to MAX_FREQ and to the
+    // visible integer range [-floor(F), floor(F)] here (in addition to the
+    // store's own sanitizeComponent) so dragging past the canvas edge can't
+    // push the value beyond what's actually shown on the frozen axis.
     let freqInt = Math.round(pxToX(x, layout));
-    freqInt = Math.max(-MAX_FREQ, Math.min(MAX_FREQ, freqInt));
+    const visibleMax = Math.min(MAX_FREQ, Math.floor(layout.F));
+    freqInt = Math.max(-visibleMax, Math.min(visibleMax, freqInt));
     if (freqInt !== dragging.startFreqInt) {
       freqAnim.set(dragging.id, { from: dragging.startFreqInt, start: performance.now() });
       dragging.startFreqInt = freqInt;
@@ -494,7 +505,11 @@ export function createSpectrumView(canvas, store, opts = {}) {
       store.updateComponent(dragging.id, { freq: freqInt, phase: wrapAngle(dragging.phaseStart + dphase) }, 'spectrum');
     } else {
       dragging.phaseStartY = undefined;
-      const value = Math.max(0, pxToY(y, layout));
+      // Apply the grab offset so amp tracks the pointer's movement relative
+      // to where the stem was grabbed, rather than snapping the head to
+      // whatever y the pointer landed on.
+      const adjY = y - (dragging.grabDy || 0);
+      const value = Math.max(0, pxToY(adjY, layout));
       let amp = ampFromValue(value, state.yScale);
       amp = Math.max(0, Math.min(MAX_AMP, amp));
       store.updateComponent(dragging.id, { freq: freqInt, amp }, 'spectrum');
@@ -558,6 +573,21 @@ export function createSpectrumView(canvas, store, opts = {}) {
     store.updateComponent(state.selectedId, { phase: wrapAngle(comp.phase + step * TWO_PI) }, 'spectrum');
   }
 
+  /**
+   * touch-action can't be changed mid-gesture, so this non-passive listener
+   * cancels the browser's default pan only when the touch actually starts on
+   * a stem/head/ring (so that gesture drags instead of scrolling); any other
+   * touch on the canvas is left alone and the page scrolls normally.
+   */
+  function onTouchStart(evt) {
+    const touch = evt.touches && evt.touches[0];
+    if (!touch) return;
+    const { x, y } = localXY(touch);
+    const state = store.get();
+    const hit = hitRingHandle(x, y, state) || hitHead(x, y) || hitStem(x, y);
+    if (hit) evt.preventDefault();
+  }
+
   function onKeyDown(evt) {
     if (evt.key !== 'Delete' && evt.key !== 'Backspace') return;
     const state = store.get();
@@ -576,6 +606,7 @@ export function createSpectrumView(canvas, store, opts = {}) {
     canvas.addEventListener('dblclick', onDblClick);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('keydown', onKeyDown);
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
   }
 
   function resize() {
@@ -592,6 +623,7 @@ export function createSpectrumView(canvas, store, opts = {}) {
       canvas.removeEventListener('dblclick', onDblClick);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('keydown', onKeyDown);
+      canvas.removeEventListener('touchstart', onTouchStart);
     }
     cv.destroy();
   }

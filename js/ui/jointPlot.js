@@ -15,6 +15,61 @@ function wrapDeg180(deg) {
   return wrapped;
 }
 
+/** Round to the nearest integer, preserving sign symmetry (Math.round alone
+ * rounds -2.5 to -2 but 2.5 to 3, which produces visibly lopsided tick sets
+ * around zero). */
+function roundSym(v) {
+  return Math.sign(v) * Math.round(Math.abs(v));
+}
+
+/** Widest rendered width among a set of label strings, in the ctx's current font. */
+function measureMaxWidth(ctx, labels) {
+  let w = 0;
+  for (const l of labels) w = Math.max(w, ctx.measureText(l).width);
+  return w;
+}
+
+/** Nearest "nice" 1-2-5 step for a numeric axis spanning `range`, aiming for ~targetCount ticks. */
+function niceStep(range, targetCount = 5) {
+  if (!(range > 0)) return 1;
+  const rough = range / targetCount;
+  const mag = 10 ** Math.floor(Math.log10(rough));
+  const norm = rough / mag;
+  let step;
+  if (norm < 1.5) step = 1;
+  else if (norm < 3.5) step = 2;
+  else if (norm < 7.5) step = 5;
+  else step = 10;
+  return step * mag;
+}
+
+/** Symmetric 1-2-5-stepped tick values covering [min, max]. */
+function niceTicksSymmetric(min, max, targetCount = 5) {
+  const step = niceStep(max - min, targetCount);
+  const start = Math.ceil(min / step) * step;
+  const ticks = [];
+  for (let v = start; v <= max + 1e-9; v += step) ticks.push(roundSym(v));
+  return [...new Set(ticks)];
+}
+
+// Degree-axis steps chosen so ticks land on angles that read naturally
+// (45/90/180 etc.) rather than arbitrary 1-2-5 multiples.
+const ANGLE_STEPS = [1, 2, 5, 10, 15, 30, 45, 90, 180, 360];
+function angleStep(range, targetCount = 4) {
+  for (const s of ANGLE_STEPS) {
+    if (range / s <= targetCount) return s;
+  }
+  return ANGLE_STEPS[ANGLE_STEPS.length - 1];
+}
+/** Symmetric, degree-friendly tick values covering [min, max]. */
+function angleTicks(min, max, targetCount = 4) {
+  const step = angleStep(Math.max(1e-6, max - min), targetCount);
+  const start = Math.ceil(min / step) * step;
+  const ticks = [];
+  for (let v = start; v <= max + 1e-9; v += step) ticks.push(roundSym(v));
+  return [...new Set(ticks)];
+}
+
 /**
  * Combined magnitude response of the currently applied filter chain: a hard
  * band-limit box (always active) and, when actuator lag is on, a first-order
@@ -131,17 +186,35 @@ export function createJointPlot(canvas, store) {
     ctx.restore();
   }
 
-  function drawThetaPanel(ctx, x0, y0, panelW, panelH, state) {
-    const components = state.components;
+  function drawThetaPanel(ctx, x0, y0, panelW, panelH, state, filteredComponents) {
+    // Plot the FILTERED arm (the band-limited + lagged components actually
+    // shown in the Control arm canvas), not the raw unfiltered components —
+    // otherwise turning actuator lag on would have no visible effect here.
+    const components = Array.isArray(filteredComponents) ? filteredComponents : state.components;
     const mode = angleModeEl && angleModeEl.value === 'rel' ? 'rel' : 'abs';
     const wrap = Boolean(angleWrapEl && angleWrapEl.checked);
 
+    const TITLE_H = 14;
+    const TICK_H = 16;
+    const plotTop = y0 + TITLE_H;
+    const plotBottom = y0 + panelH - TICK_H;
+    const innerH = Math.max(1, plotBottom - plotTop);
+
     ctx.save();
-    ctx.strokeStyle = cssVar('--border-color', '#334155');
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x0, y0, panelW, panelH);
+
+    // Title lives in its own band above the plot area so it never overlaps
+    // the traces (which can run right up to the top of the panel).
+    ctx.fillStyle = cssVar('--text-secondary', '#94a3b8');
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    const label = mode === 'rel' ? 'q_k(t)' : 'θ_k(t)';
+    ctx.fillText(`${label}${wrap ? ' (wrapped)' : ''} — joint angle (filtered arm) vs t`, x0, y0);
 
     if (components.length === 0) {
+      ctx.strokeStyle = cssVar('--border-color', '#334155');
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x0, plotTop, panelW, innerH);
       ctx.restore();
       return;
     }
@@ -170,10 +243,18 @@ export function createJointPlot(canvas, store) {
     minA -= pad;
     maxA += pad;
 
-    const plotL = x0 + 34;
-    const plotW = x0 + panelW - plotL;
+    const yTickVals = angleTicks(minA, maxA, 4);
+    ctx.font = '10px sans-serif';
+    const yLabelW = Math.max(24, measureMaxWidth(ctx, yTickVals.map((v) => `${v}°`)) + 10);
+
+    const plotL = x0 + yLabelW;
+    const plotW = Math.max(1, x0 + panelW - plotL - 8);
     const toX = (t) => plotL + t * plotW;
-    const toY = (a) => y0 + panelH - ((a - minA) / (maxA - minA)) * panelH;
+    const toY = (a) => plotBottom - ((a - minA) / (maxA - minA)) * innerH;
+
+    ctx.strokeStyle = cssVar('--border-color', '#334155');
+    ctx.lineWidth = 1;
+    ctx.strokeRect(plotL, plotTop, plotW, innerH);
 
     for (let k = 0; k < components.length; k += 1) {
       ctx.strokeStyle = components[k].color || cssVar('--primary-color', '#00693e');
@@ -204,38 +285,42 @@ export function createJointPlot(canvas, store) {
     ctx.strokeStyle = cssVar('--text-primary', '#f1f5f9');
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(cursorX, y0);
-    ctx.lineTo(cursorX, y0 + panelH);
+    ctx.moveTo(cursorX, plotTop);
+    ctx.lineTo(cursorX, plotBottom);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Axes: t on x (0..1), angle (deg) on y.
+    // Axes: t on x (0..1), angle (deg, nice/symmetric ticks) on y.
     const xTicks = [0, 0.25, 0.5, 0.75, 1].map((t) => ({ x: toX(t), label: t.toFixed(2) }));
-    const yTicks = [minA + pad, (minA + maxA) / 2, maxA - pad].map((a) => ({
-      y: toY(a),
-      label: `${Math.round(a)}°`,
-    }));
-    drawAxes(ctx, plotL, y0, plotW, panelH, { xTicks, yTicks });
+    const yTicks = yTickVals.map((v) => ({ y: toY(v), label: `${v}°` }));
+    drawAxes(ctx, plotL, plotTop, plotW, innerH, { xTicks, yTicks });
 
-    // Titled at the bottom-right so it never collides with the y-axis tick
-    // labels (top-left) or the traces (which start bunched near the left edge).
-    ctx.fillStyle = cssVar('--text-secondary', '#94a3b8');
-    ctx.font = '11px sans-serif';
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'alphabetic';
-    const label = mode === 'rel' ? 'q_k(t)' : 'θ_k(t)';
-    ctx.fillText(`${label}${wrap ? ' (wrapped)' : ''} — t (x) vs angle° (y)`, x0 + panelW - 4, y0 + panelH - 4);
     ctx.restore();
   }
 
   function drawSpectrumPanel(ctx, x0, y0, panelW, panelH, info) {
-    ctx.save();
-    ctx.strokeStyle = cssVar('--border-color', '#334155');
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x0, y0, panelW, panelH);
-
     const { entries, bandwidth, useLag, fc } = info;
+
+    const TITLE_H = 14;
+    const TICK_H = 16;
+    const plotTop = y0 + TITLE_H;
+    const plotBottom = y0 + panelH - TICK_H;
+
+    ctx.save();
+
+    // Title in its own band above the plot area (was previously drawn inside
+    // the plot, top-right, where it could overlap bars/curve near the edge).
+    ctx.fillStyle = cssVar('--text-secondary', '#94a3b8');
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    const title = useLag ? 'Spectrum |c_f| + filtered + |H(f)| (band-limit × lag)' : 'Spectrum |c_f| + filtered + |H(f)| (band-limit)';
+    ctx.fillText(title, x0, y0);
+
     if (entries.length === 0) {
+      ctx.strokeStyle = cssVar('--border-color', '#334155');
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x0, plotTop, panelW, Math.max(1, plotBottom - plotTop));
       ctx.restore();
       return;
     }
@@ -243,14 +328,18 @@ export function createJointPlot(canvas, store) {
     const F = Math.max(maxFreq, bandwidth) + 2;
     const maxMag = entries.reduce((m, e) => Math.max(m, Math.hypot(e.c.re, e.c.im)), 1e-9);
 
-    const plotL = x0 + 30;
-    const plotW = x0 + panelW - plotL;
-    const plotBottom = y0 + panelH - 12;
-    const plotTop = y0 + 4;
-    const plotH = plotBottom - plotTop;
+    ctx.font = '10px sans-serif';
+    const yLabelW = Math.max(24, measureMaxWidth(ctx, ['0', '0.5', 'max']) + 10);
+    const plotL = x0 + yLabelW;
+    const plotW = Math.max(1, x0 + panelW - plotL - 8);
+    const plotH = Math.max(1, plotBottom - plotTop);
     const toX = (f) => plotL + ((f + F) / (2 * F)) * plotW;
     const clampX = (x) => Math.max(plotL, Math.min(plotL + plotW, x));
     const barW = Math.max(2, plotW / (2 * F) - 1);
+
+    ctx.strokeStyle = cssVar('--border-color', '#334155');
+    ctx.lineWidth = 1;
+    ctx.strokeRect(plotL, plotTop, plotW, plotH);
 
     // Passband / filter shading (clamped so it never overflows the panel).
     ctx.fillStyle = cssVar('--passband-fill', 'rgba(16, 185, 129, 0.15)');
@@ -294,27 +383,16 @@ export function createJointPlot(canvas, store) {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Axes: f on x, magnitude on y (0..max as a fraction of the largest |c_f|).
-    const fTickCount = 4;
-    const xTicks = [];
-    for (let i = -fTickCount; i <= fTickCount; i += 1) {
-      const f = Math.round((F * i) / fTickCount);
-      xTicks.push({ x: toX(f), label: String(f) });
-    }
+    // Axes: f on x (nice, symmetric 1-2-5 steps), magnitude on y (0..max as a
+    // fraction of the largest |c_f|).
+    const xTickVals = niceTicksSymmetric(-F, F, 4);
+    const xTicks = xTickVals.map((f) => ({ x: toX(f), label: String(f) }));
     const yTicks = [0, 0.5, 1].map((frac) => ({ y: plotBottom - frac * plotH, label: frac === 1 ? 'max' : String(frac) }));
     drawAxes(ctx, plotL, plotTop, plotW, plotH, { xTicks, yTicks });
-
-    // Top-right, clear of the top-left y-axis "max" tick label.
-    ctx.fillStyle = cssVar('--text-secondary', '#94a3b8');
-    ctx.font = '11px sans-serif';
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'alphabetic';
-    const title = useLag ? 'Spectrum |c_f| + filtered bars + |H(f)| (band-limit × lag)' : 'Spectrum |c_f| + filtered bars + |H(f)| (band-limit)';
-    ctx.fillText(title, x0 + panelW - 4, plotTop + 10);
     ctx.restore();
   }
 
-  function render(state, derived) {
+  function render(state, derived, filteredComponents) {
     const { ctx, w, h } = canvasState;
     ctx.clearRect(0, 0, w, h);
 
@@ -322,7 +400,7 @@ export function createJointPlot(canvas, store) {
     const thetaH = Math.round(h * 0.55);
     const spectrumH = h - thetaH - gap;
 
-    drawThetaPanel(ctx, 0, 0, w, thetaH, state);
+    drawThetaPanel(ctx, 0, 0, w, thetaH, state, filteredComponents);
     const info = updateReadouts(state, derived);
     drawSpectrumPanel(ctx, 0, thetaH + gap, w, spectrumH, info);
   }

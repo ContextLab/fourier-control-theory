@@ -36,14 +36,15 @@ No build step: plain HTML, CSS, and ES modules, rendered on `<canvas>`.
   toggles for absolute vs. relative (motor) angle and wrapped vs. unwrapped phase, a
   bandwidth slider that truncates the series to a low-pass approximation, and a
   feedback-lag toggle that applies a first-order lag filter `H(f) = 1 / (1 + i f / f_c)` to
-  every component; both the bandwidth limit and the lag filter apply together. A spectrum
-  panel plots `|c_f|` with the retained passband shaded, and overlays `|H(f)|` once lag is
-  on.
+  every component; both the bandwidth limit and the lag filter apply together, and the arm
+  and joint-angle traces shown are the *filtered* arm. A spectrum panel plots `|c_f|` with
+  the retained passband shaded and always overlays `|H(f)|`, whether or not the lag toggle
+  is on.
 - **Component editor** — an explicit list of components (frequency, amplitude, phase) with
   add/remove controls and shape presets (human arm, circle, ellipse, square wave, sawtooth,
   star, heart). Every component's frequency and amplitude are clamped to a safe range
-  (`MAX_FREQ`/`MAX_AMP` in `js/core/store.js`), so a stray drag or a typed-in value can't
-  produce a runaway animation.
+  (`MAX_FREQ` = 256 cycles/period, `MAX_AMP` = 5, both in `js/core/store.js`), so a stray
+  drag or a typed-in value can't produce a runaway animation.
 - **Tutorial** — a written walkthrough (rendered with KaTeX) of the Fourier-analysis math,
   the control-theory background, and the correspondence between them.
 - Light/dark theme toggle, HiDPI canvases, and pointer events that work with touch.
@@ -90,7 +91,7 @@ browser console, e.g. `fourierDemo.store.get().components`.
 | `index.html` | Page shell: header, the Arm/Draw/Control tabs, the tutorial section, KaTeX and Font Awesome from CDN |
 | `css/theme.css` | CSS custom properties for the light/dark theme, base styles, buttons, cards, nav |
 | `css/app.css` | Layout grid, canvas sizing, sliders, the component editor list, tab styling |
-| `js/app.js` | Bootstraps the store, wires up the tabs and theme toggle, runs the single `requestAnimationFrame` loop, loads the tutorial |
+| `js/app.js` | Bootstraps the store, wires up the tabs, theme toggle, and presets menu, runs the single `requestAnimationFrame` loop, loads the tutorial |
 | `js/core/complex.js` | Pure complex-number arithmetic: add, sub, mul, scale, abs, arg, `e^{i\theta}` |
 | `js/core/fourier.js` | Pure Fourier math: arc-length resampling, DFT, inverse evaluation, top-K selection, low-pass filtering |
 | `js/core/arm.js` | Pure arm kinematics: joint positions, joint angles (absolute and relative), drag inversion, path sampling |
@@ -101,8 +102,8 @@ browser console, e.g. `fourierDemo.store.get().components`.
 | `js/ui/armSkin.js` | Draws the anatomical arm: one continuous skin outline built around the bone chain, blended at each joint |
 | `js/ui/spectrumView.js` | Renders the stem plot and handles stem dragging (amplitude, frequency, phase) |
 | `js/ui/drawView.js` | Freehand capture and the epicycle reconstruction animation |
-| `js/ui/jointPlot.js` | Joint-angle-vs-time plot and the control-theory overlays (bandwidth, lag filter, mini Bode plot) |
-| `js/ui/editor.js` | The component list UI: add/remove, numeric inputs, presets menu |
+| `js/ui/jointPlot.js` | Joint-angle-vs-time plot (filtered arm) and the control-theory overlays (bandwidth, lag filter, spectrum panel with `|H(f)|` overlay) |
+| `js/ui/editor.js` | The component list UI: add/remove, numeric inputs |
 | `content/tutorial.html` | The tutorial text, fetched into the page and rendered with KaTeX |
 | `tests/unit/*.test.js` | Node built-in test runner tests for the math core |
 | `tests/e2e/screens.spec.js` | Playwright end-to-end tests |
