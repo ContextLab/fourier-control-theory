@@ -11,6 +11,14 @@ export const PALETTE = ['#267aba', '#ffa00f', '#a5d75f', '#8a6996', '#d94415', '
 export const MAX_FREQ = 256;
 /** Largest amplitude a component may hold. */
 export const MAX_AMP = 5;
+/**
+ * Largest amplitude (radians) a single gesture-mode joint harmonic may hold —
+ * pi/2 (90 degrees). A joint's *relative* angle oscillating a full 90 degrees
+ * around its mean is already an extreme range of motion, and this also
+ * backstops the spectrum view's harmonic-stem drag against runaway growth
+ * (see updateJointHarmonic).
+ */
+export const GESTURE_MAX_HARMONIC_AMP = Math.PI / 2;
 
 /** Wrap a phase (radians) into (−π, π]. */
 function wrapPhase(phase) {
@@ -202,20 +210,39 @@ export function createStore(initial = {}) {
      */
     updateJointMean(id, mean, source) {
       if (!state.gesture) return;
+      let m = Number(mean);
+      m = Number.isFinite(m) ? wrapPhase(m) : 0;
       const bones = state.gesture.bones.map((b) => (
-        b.id === id ? { ...b, series: { ...b.series, mean } } : b
+        b.id === id ? { ...b, series: { ...b.series, mean: m } } : b
       ));
       state = { ...state, gesture: { ...state.gesture, bones } };
       notify(new Set(['gesture']), source);
     },
 
-    /** Patch one harmonic of one gesture joint's series (spectrum-view drag). */
+    /**
+     * Patch one harmonic of one gesture joint's series (spectrum-view drag).
+     * `amp` (if present) is clamped to [0, GESTURE_MAX_HARMONIC_AMP] and
+     * `phase` (if present) is wrapped to (-pi, pi] — the same sanitize-at-the-
+     * store-boundary discipline as sanitizeComponent, so a runaway/garbage
+     * drag value can never reach the rendered pose regardless of what the
+     * view computed.
+     */
     updateJointHarmonic(id, h, patch, source) {
       if (!state.gesture) return;
+      const safePatch = { ...patch };
+      if (safePatch.amp !== undefined) {
+        let amp = Number(safePatch.amp);
+        if (!Number.isFinite(amp)) amp = 0;
+        safePatch.amp = clamp(Math.abs(amp), 0, GESTURE_MAX_HARMONIC_AMP);
+      }
+      if (safePatch.phase !== undefined) {
+        const phase = Number(safePatch.phase);
+        safePatch.phase = Number.isFinite(phase) ? wrapPhase(phase) : 0;
+      }
       const bones = state.gesture.bones.map((b) => {
         if (b.id !== id) return b;
         const harmonics = b.series.harmonics.map((entry) => (
-          entry.h === h ? { ...entry, ...patch } : entry
+          entry.h === h ? { ...entry, ...safePatch } : entry
         ));
         return { ...b, series: { ...b.series, harmonics } };
       });

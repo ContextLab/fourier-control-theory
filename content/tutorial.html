@@ -370,10 +370,14 @@
 
   <h3>3.5 The human-arm view, and where the analogy breaks down</h3>
   <p>
-    The default Arm-tab preset draws the chain as a human arm: each component is a bone, upper
-    arm, forearm, hand, finger, and fingertip, and the skin is a single outline that deforms
-    around the shoulder, elbow, wrist, and knuckle joints as the bones move (see §3.3 for how
-    dragging a bone in this view differs from dragging a bare link). It's a useful picture
+    The Fourier-spin preset (the "Fourier spin" preset, or any shape preset) draws the chain as
+    a human arm: each component is a bone, upper arm, forearm, hand, finger, and fingertip, and
+    the skin is a single outline that deforms around the shoulder, elbow, wrist, and knuckle
+    joints as the bones move (see §3.3 for how dragging a bone in this view differs from
+    dragging a bare link). The default Arm-tab preset is gesture mode's "wave hello" instead,
+    where each joint follows its own bounded, periodic series rather than spinning at a
+    constant rate (see §4) — but the bones-as-components picture below is still the clearest
+    way to see where a constant-rate phasor's analogy to a real joint breaks down. It's a useful picture
     precisely because it's an imperfect one: a real shoulder or elbow is a revolute joint with a
     hard range of motion, not a motor free to spin forever, so it can never sustain the
     constant-rate rotation this demo's phasors assume. Watch the skin as $t$ runs past a full

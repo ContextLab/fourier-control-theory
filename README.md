@@ -29,8 +29,9 @@ No build step: plain HTML, CSS, and ES modules, rendered on `<canvas>`.
     ball — carries it, and sets it back down, on a seamless loop). Dragging any joint
     rotates its *mean* angle only; the oscillation continues around the new mean, and
     everything downstream (the whole hand, for a main-chain joint) follows. The spectrum
-    view shows the *joint-angle* spectrum (one group of stems per joint, in degrees) for
-    whichever joint is selected, draggable for amplitude/phase; the editor shows per-joint
+    view shows the *joint-angle* spectrum (mean + harmonic stems, in degrees) for whichever
+    joint is selected — one joint's stems at a time, not all 18 at once — draggable for
+    amplitude/phase; the editor shows per-joint
     mean+harmonic rows, fingers grouped into collapsible sections.
   - **Fourier-spin mode** ("Fourier spin" preset, or any shape preset) — the original
     picture: 5 components are the bones (upper arm, forearm, hand, finger, fingertip), each

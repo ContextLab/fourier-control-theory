@@ -158,6 +158,29 @@ export function createJointPlot(canvas, store) {
     return { entries, filtered, bandwidth, useLag, fc };
   }
 
+  /** Small right-aligned color-swatch legend, drawn in the same band as the panel title. */
+  function drawLegend(ctx, x0, y0, panelW, items) {
+    ctx.save();
+    ctx.font = '10px sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+    const swatch = 8;
+    const labelGap = 4;
+    const itemGap = 12;
+    const widths = items.map((it) => swatch + labelGap + ctx.measureText(it.label).width);
+    const totalW = widths.reduce((a, b) => a + b, 0) + itemGap * (items.length - 1);
+    const rightPad = 4; // keeps the last label's text from touching/clipping at the canvas edge
+    let x = x0 + panelW - totalW - rightPad;
+    items.forEach((it, i) => {
+      ctx.fillStyle = it.color;
+      ctx.fillRect(x, y0 + 2, swatch, swatch);
+      ctx.fillStyle = cssVar('--text-secondary', '#94a3b8');
+      ctx.fillText(it.label, x + swatch + labelGap, y0);
+      x += widths[i] + itemGap;
+    });
+    ctx.restore();
+  }
+
   function drawAxes(ctx, x0, y0, panelW, panelH, { xTicks, yTicks }) {
     ctx.save();
     ctx.strokeStyle = cssVar('--divider-color', '#475569');
@@ -428,6 +451,13 @@ export function createJointPlot(canvas, store) {
     const label = mode === 'rel' ? 'q_k(t)' : 'θ_k(t)';
     ctx.fillText(`${label}${wrap ? ' (wrapped)' : ''} — main-chain joint angle (filtered) vs t`, x0 + 2, y0);
 
+    const byId = new Map((state.gesture ? state.gesture.bones : []).map((b) => [b.id, b]));
+    const JOINT_LEGEND_LABELS = { upperArm: 'upper arm', forearm: 'forearm', palm: 'hand' };
+    drawLegend(ctx, x0, y0, panelW, MAIN_JOINT_IDS.map((id) => ({
+      label: JOINT_LEGEND_LABELS[id] || id,
+      color: (byId.get(id) || {}).color || cssVar('--primary-color', '#00693e'),
+    })));
+
     if (bones.length === 0) {
       ctx.strokeStyle = cssVar('--border-color', '#334155');
       ctx.lineWidth = 1;
@@ -471,7 +501,6 @@ export function createJointPlot(canvas, store) {
     ctx.lineWidth = 1;
     ctx.strokeRect(plotL, plotTop, plotW, innerH);
 
-    const byId = new Map((state.gesture ? state.gesture.bones : []).map((b) => [b.id, b]));
     MAIN_JOINT_IDS.forEach((id, k) => {
       ctx.strokeStyle = (byId.get(id) || {}).color || cssVar('--primary-color', '#00693e');
       ctx.lineWidth = 2;

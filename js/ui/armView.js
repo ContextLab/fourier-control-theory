@@ -12,6 +12,15 @@ import {
 const HIT_RADIUS = 12; // px, joint-tip hit test
 const TRAIL_MAX = 90; // recent-tip trail length (frames)
 const FIT_MARGIN = 0.08; // fraction of each side reserved as margin around the fitted bbox
+// The metallic shell (ui/armSkin.js) is drawn around the bone/joint
+// CENTERLINE with a half-width of up to ~0.16 x armScale (the shoulder end of
+// LIMB_PROFILES.upperArm) — world-unit-equivalent to roughly this fraction of
+// the arm's total reach. The envelope bbox below is built from joint/path
+// POINTS only, so without this pad the shell's outline (not just its
+// centerline) can spill past the auto-fit margin and get cropped/touch the
+// canvas edge. Padding every side of the bbox by this fraction of the total
+// reach keeps the whole rendered shell inside the fitted view.
+const SHELL_WIDTH_FRACTION = 0.22;
 const SCALE_EASE = 0.12; // per-render lerp factor for autofit scale/center (frozen while dragging)
 const TIME_JUMP_THRESHOLD = 0.05; // fraction of a period; a bigger circular jump resets the trail
 const THEME_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
@@ -210,6 +219,16 @@ export function createArmView(canvas, store, opts = {}) {
     const pts = jointPositions(components, state.t, { re: 0, im: 0 });
     for (const p of pts) extend(p.re, p.im);
 
+    // Pad every side by an estimate of the metallic shell's own half-width
+    // (see SHELL_WIDTH_FRACTION), so the fit reserves room for the drawn skin
+    // outline, not just the bone centerlines.
+    const totalReach = components.reduce((s, c) => s + Math.abs(c.amp), 0);
+    const shellPad = totalReach * SHELL_WIDTH_FRACTION;
+    minRe -= shellPad;
+    maxRe += shellPad;
+    minIm -= shellPad;
+    maxIm += shellPad;
+
     let bboxW = Number.isFinite(minRe) ? maxRe - minRe : 0;
     let bboxH = Number.isFinite(minIm) ? maxIm - minIm : 0;
     const cx = Number.isFinite(minRe) ? (minRe + maxRe) / 2 : 0;
@@ -266,6 +285,16 @@ export function createArmView(canvas, store, opts = {}) {
       extend(PICKUP.ballRestX - PICKUP.tableHalfWidth, PICKUP.tableY - 0.05);
       extend(PICKUP.ballRestX + PICKUP.tableHalfWidth, PICKUP.tableY + 0.05);
     }
+    const totalReach = bones.reduce((s, b) => (MAIN_JOINT_IDS.includes(b.id) ? s + b.length : s), 0);
+    // Pad by the shell's own estimated half-width (see SHELL_WIDTH_FRACTION at
+    // the top of this file) — the shoulder shell touching the canvas edge in
+    // wave/pick-up was this envelope covering only joint/ball centerpoints,
+    // not the drawn skin's actual outline.
+    const shellPad = totalReach * SHELL_WIDTH_FRACTION;
+    minRe -= shellPad;
+    maxRe += shellPad;
+    minIm -= shellPad;
+    maxIm += shellPad;
     let bboxW = Number.isFinite(minRe) ? maxRe - minRe : 0;
     let bboxH = Number.isFinite(minIm) ? maxIm - minIm : 0;
     const cx = Number.isFinite(minRe) ? (minRe + maxRe) / 2 : 0;
@@ -277,7 +306,6 @@ export function createArmView(canvas, store, opts = {}) {
     const bbox = {
       minRe, maxRe, minIm, maxIm, cx, cy, bboxW, bboxH,
     };
-    const totalReach = bones.reduce((s, b) => (MAIN_JOINT_IDS.includes(b.id) ? s + b.length : s), 0);
     return { bbox, totalReach };
   }
 
@@ -442,7 +470,14 @@ export function createArmView(canvas, store, opts = {}) {
    */
   function drawBall(ctx, tf, ballState) {
     const ballPx = tf.toPx(ballState.pos);
-    const r = Math.max(4, PICKUP.ballRadius * currentScale);
+    // While held, the closed fingers would otherwise hide almost all of the
+    // ball (they curl fully around a same-size sphere): drawn a bit larger
+    // than its rest size, it pokes out past the finger tubes into the visible
+    // gaps between them (each finger is its own separate outline — see
+    // ui/armSkin.js — with real gaps between adjacent fingers), so a grasped
+    // ball stays clearly visible instead of nearly disappearing into the fist.
+    const heldBoost = ballState.attached ? 1.65 : 1;
+    const r = Math.max(4, PICKUP.ballRadius * currentScale * heldBoost);
     const grad = ctx.createRadialGradient(ballPx.x - r * 0.35, ballPx.y - r * 0.35, r * 0.1, ballPx.x, ballPx.y, r);
     grad.addColorStop(0, colors.accent);
     grad.addColorStop(1, colors.ballColor);

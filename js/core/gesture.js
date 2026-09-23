@@ -211,6 +211,18 @@ const GROUP_COLORS = {
   little: '#9d162e',
 };
 
+// The 3 main-chain joints share the 'arm' group (anatomically), but each gets
+// its own DISTINCT display color — used for its editor swatch, its curve in
+// the Control tab's joint-angle plot, and that plot's legend — so the three
+// curves are distinguishable instead of all rendering as the same blue.
+// Chosen from the same palette family as GROUP_COLORS but not reused by any
+// finger group, to avoid an unrelated on-screen color collision.
+const MAIN_JOINT_COLORS = {
+  upperArm: '#267aba',
+  forearm: '#f5dc69',
+  palm: '#c4dd88',
+};
+
 /**
  * [proximal, middle, distal] lengths + palm attachment (lateral = along the
  * knuckle line, forward = along the palm's own direction), world units.
@@ -256,9 +268,9 @@ export const ALL_JOINT_IDS = [
  */
 export function buildMainChain(seriesFor) {
   return [
-    { id: 'upperArm', parent: null, length: 0.34, group: 'arm', label: 'Upper arm', color: GROUP_COLORS.arm, series: seriesFor('upperArm') },
-    { id: 'forearm', parent: 'upperArm', length: 0.29, group: 'arm', label: 'Forearm (elbow)', color: GROUP_COLORS.arm, series: seriesFor('forearm') },
-    { id: 'palm', parent: 'forearm', length: 0.125, group: 'arm', label: 'Palm (wrist)', color: GROUP_COLORS.arm, series: seriesFor('palm') },
+    { id: 'upperArm', parent: null, length: 0.34, group: 'arm', label: 'Upper arm', color: MAIN_JOINT_COLORS.upperArm, series: seriesFor('upperArm') },
+    { id: 'forearm', parent: 'upperArm', length: 0.29, group: 'arm', label: 'Forearm (elbow)', color: MAIN_JOINT_COLORS.forearm, series: seriesFor('forearm') },
+    { id: 'palm', parent: 'forearm', length: 0.125, group: 'arm', label: 'Palm (wrist)', color: MAIN_JOINT_COLORS.palm, series: seriesFor('palm') },
   ];
 }
 

@@ -3,7 +3,7 @@
 // Delete/Backspace to remove, shift-drop to merge duplicate frequencies.
 import { setupCanvas, cssVar } from './canvas.js';
 import { add, abs, arg, fromPolar } from '../core/complex.js';
-import { MAX_FREQ, MAX_AMP } from '../core/store.js';
+import { MAX_FREQ, MAX_AMP, GESTURE_MAX_HARMONIC_AMP } from '../core/store.js';
 import { MAIN_JOINT_IDS } from '../core/gesture.js';
 
 const RAD2DEG = 180 / Math.PI;
@@ -104,6 +104,15 @@ export function createSpectrumView(canvas, store, opts = {}) {
   let lastGestureStems = []; // [{h, isMean, px, py, baseY}]
   let lastGestureLayout = null;
   let lastGestureBoneId = null;
+  // Gesture spectrum's y-axis scale (maxAbs, degrees), eased in normally but
+  // FROZEN for the whole duration of a gesture-stem drag — same pattern as
+  // computeLayout's F/yMax freeze for the spin-mode spectrum. Without this,
+  // dragging a harmonic amplitude up rescales the axis every frame (amp grows
+  // -> maxAbs grows), which lets the pointer keep "outrunning" the axis and
+  // the value runs away without bound.
+  let currentGestureMaxAbs = 20;
+  let gestureAxisInitialized = false;
+  const GESTURE_AXIS_EASE = 0.15;
 
   function selectedGestureBone(state, bones) {
     return bones.find((b) => b.id === state.selectedId) || bones.find((b) => b.id === MAIN_JOINT_IDS[0]);
@@ -125,7 +134,14 @@ export function createSpectrumView(canvas, store, opts = {}) {
     const plotY = MARGIN.top;
     const plotW = Math.max(1, cv.w - MARGIN.left - MARGIN.right);
     const plotH = Math.max(1, cv.h - MARGIN.top - MARGIN.bottom);
-    const maxAbs = Math.max(20, ...entries.map((e) => Math.abs(e.val))) * 1.25;
+    const targetMaxAbs = Math.max(20, ...entries.map((e) => Math.abs(e.val))) * 1.25;
+    if (!gestureAxisInitialized) {
+      currentGestureMaxAbs = targetMaxAbs;
+      gestureAxisInitialized = true;
+    } else if (!(dragging && dragging.gesture)) {
+      currentGestureMaxAbs += (targetMaxAbs - currentGestureMaxAbs) * GESTURE_AXIS_EASE;
+    }
+    const maxAbs = currentGestureMaxAbs;
     const F = GESTURE_MAX_H;
     const xToPx = (hIdx) => plotX + ((hIdx + 0.5) / (F + 1)) * plotW;
     const midY = plotY + plotH / 2;
@@ -184,12 +200,19 @@ export function createSpectrumView(canvas, store, opts = {}) {
       void selected;
     }
 
-    if (!hasInteracted && plotW >= 260) {
-      ctx.font = themeFont(11);
+    // Affordance hint: two short lines drawn INSIDE the plot area (near its
+    // top) rather than below it — below the plot there's only MARGIN.bottom
+    // (26px) of room, and a two-line hint there was clipped at the canvas's
+    // bottom edge on narrow (~390px) viewports. Gated on plotH too, so it's
+    // simply omitted rather than overlapping stems on a very short canvas.
+    if (!hasInteracted && plotW >= 220 && plotH >= 70) {
+      ctx.font = themeFont(10.5);
       ctx.textAlign = 'center';
       ctx.fillStyle = colors.textSecondary;
       ctx.globalAlpha = 0.6;
-      ctx.fillText('drag ↕ amplitude (or mean) · alt-drag ↕ phase', plotX + plotW / 2, plotY + plotH + 30);
+      const hx = plotX + plotW / 2;
+      ctx.fillText('drag ↕ amplitude (or mean)', hx, plotY + 12);
+      ctx.fillText('alt-drag ↕ phase', hx, plotY + 24);
       ctx.globalAlpha = 1;
     }
     ctx.restore();
@@ -530,7 +553,17 @@ export function createSpectrumView(canvas, store, opts = {}) {
     if (state.motion === 'gesture' && state.gesture) {
       const s = hitGestureStem(x, y);
       if (!s) return;
-      dragging = { gesture: true, boneId: lastGestureBoneId, h: s.h, isMean: s.isMean };
+      dragging = {
+        gesture: true,
+        boneId: lastGestureBoneId,
+        h: s.h,
+        isMean: s.isMean,
+        // Grab offset (pointer y minus stem head y at pointerdown), applied on
+        // every move so amp/mean changes track the pointer's movement relative
+        // to where the stem was grabbed instead of snapping the head straight
+        // to the pointer — same technique as the spin-mode stem drag's grabDy.
+        grabDy: y - s.py,
+      };
       canvas.style.cursor = 'grabbing';
       canvas.setPointerCapture(evt.pointerId);
       evt.preventDefault();
@@ -596,10 +629,18 @@ export function createSpectrumView(canvas, store, opts = {}) {
       const bones = state.gesture && state.gesture.bones;
       const L = lastGestureLayout;
       if (!bones || !L) return;
-      const value = L.maxAbs * ((L.midY - y) / (L.plotH / 2)); // degrees
+      // Apply the grab offset so the value tracks the pointer's movement
+      // relative to where the stem was grabbed (not an absolute snap to the
+      // pointer's y), and read L.maxAbs — frozen for the whole drag by
+      // renderGestureSpectrum above — so the axis can't rescale out from
+      // under the pointer mid-drag.
+      const adjY = y - (dragging.grabDy || 0);
+      const value = L.maxAbs * ((L.midY - adjY) / (L.plotH / 2)); // degrees
       if (dragging.isMean) {
-        const clamped = Math.max(-180, Math.min(180, value));
-        store.updateJointMean(dragging.boneId, clamped * DEG2RAD, 'spectrum');
+        // Wrap (not hard-clamp) to (-pi, pi]: the mean is an angle, so it
+        // should keep rotating continuously past +-180 rather than sticking
+        // at the boundary.
+        store.updateJointMean(dragging.boneId, wrapAngle(value * DEG2RAD), 'spectrum');
       } else if (evt.altKey) {
         const bone = bones.find((b) => b.id === dragging.boneId);
         const harmonic = bone && bone.series.harmonics.find((hm) => hm.h === dragging.h);
@@ -611,8 +652,11 @@ export function createSpectrumView(canvas, store, opts = {}) {
         store.updateJointHarmonic(dragging.boneId, dragging.h, { phase: wrapAngle(dragging.phaseStart + dphase) }, 'spectrum');
       } else {
         dragging.phaseStartY = undefined;
-        const amp = Math.max(0, value);
-        store.updateJointHarmonic(dragging.boneId, dragging.h, { amp: amp * DEG2RAD }, 'spectrum');
+        // Clamp to GESTURE_MAX_HARMONIC_AMP (also enforced by the store as a
+        // defense-in-depth backstop): a joint harmonic's amplitude has no
+        // business exceeding 90 degrees of swing around the mean.
+        const amp = Math.min(GESTURE_MAX_HARMONIC_AMP, Math.max(0, value * DEG2RAD));
+        store.updateJointHarmonic(dragging.boneId, dragging.h, { amp }, 'spectrum');
       }
       evt.preventDefault();
       return;
@@ -813,8 +857,19 @@ export function createSpectrumView(canvas, store, opts = {}) {
     cv.destroy();
   }
 
-  /** Stem heads from the last render, in CSS px relative to the canvas's top-left. */
+  /**
+   * Stem heads from the last render, in CSS px relative to the canvas's
+   * top-left. In gesture mode this returns the SELECTED joint's mean +
+   * harmonic stems (id: `g-${h}`, plus `h`/`isMean`) instead of the spin-mode
+   * component stems, so callers (e.g. e2e tests) can locate and drag a
+   * gesture harmonic stem the same way they locate a spin-mode one.
+   */
   function stemHeads() {
+    if (store.get().motion === 'gesture') {
+      return lastGestureStems.map((st) => ({
+        id: `g-${st.h}`, h: st.h, isMean: st.isMean, x: st.px, y: st.py, baseY: st.baseY,
+      }));
+    }
     return lastStems.map((st) => ({ id: st.id, freq: st.freq, x: st.headX, y: st.headY, baseY: st.baseY }));
   }
 
