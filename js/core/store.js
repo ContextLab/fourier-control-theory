@@ -41,6 +41,26 @@ function defaultState() {
 export function createStore(initial = {}) {
   let state = { ...defaultState(), ...initial };
   let nextId = 1 + state.components.reduce((m, c) => Math.max(m, c.id || 0), 0);
+
+  // Give every component a unique id and a palette color. Components without an
+  // id (e.g. straight from preset()) or with an id already used in the list get
+  // a fresh one, so updateComponent/removeComponent always target exactly one.
+  function withIds(list) {
+    const seen = new Set();
+    return list.map((c) => {
+      let out = c;
+      if (c.id == null || seen.has(c.id)) {
+        const id = nextId++;
+        out = { ...c, id };
+      } else if (c.id >= nextId) {
+        nextId = c.id + 1;
+      }
+      if (!out.color) out = { ...out, color: PALETTE[(out.id - 1) % PALETTE.length] };
+      seen.add(out.id);
+      return out;
+    });
+  }
+  state.components = withIds(state.components);
   let subscribers = [];
   let dirty = true;
   let cachedDerived = null;
@@ -62,6 +82,7 @@ export function createStore(initial = {}) {
     /** Shallow-merge a patch into state and notify subscribers. */
     set(patch, source) {
       const changedKeys = new Set(Object.keys(patch));
+      if (patch.components) patch = { ...patch, components: withIds(patch.components) };
       state = { ...state, ...patch };
       if (changedKeys.has('components')) dirty = true;
       notify(changedKeys, source);
@@ -86,7 +107,7 @@ export function createStore(initial = {}) {
     addComponent(partial = {}) {
       const id = nextId++;
       const color = PALETTE[(id - 1) % PALETTE.length];
-      const comp = { id, freq: 0, amp: 0.2, phase: 0, color, ...partial };
+      const comp = { freq: 0, amp: 0.2, phase: 0, color, ...partial, id };
       state = { ...state, components: [...state.components, comp] };
       dirty = true;
       notify(new Set(['components']), 'store');
@@ -102,7 +123,7 @@ export function createStore(initial = {}) {
 
     /** Replace the whole components list. */
     setComponents(list, source) {
-      state = { ...state, components: list };
+      state = { ...state, components: withIds(list) };
       dirty = true;
       notify(new Set(['components']), source);
     },

@@ -204,6 +204,10 @@ const jointCanvas = document.getElementById('joint-canvas');
 const armView = createArmView(armCanvas, store, { interactive: true, showTrace: true });
 const spectrumView = createSpectrumView(spectrumCanvas, store, {});
 
+// Handle for the browser console and the end-to-end tests: read state, and find
+// where joints and stems are currently drawn.
+window.fourierDemo = { store, armView, spectrumView };
+
 // The control-tab arm shows only the band-limited (or actuator-lag-filtered)
 // reconstruction, so it visually demonstrates bandwidth truncation while the
 // view's own faint background path (from `derived`, always the full series)

@@ -103,6 +103,7 @@ test('no console errors across a full interaction pass', async ({ page }) => {
       await page.waitForTimeout(100);
     }
     await page.click('#theme-toggle');
+    await page.click('#tab-arm'); // #play lives in the Arm tab's transport bar
     await page.click('#play');
     await page.waitForTimeout(300);
   });
@@ -116,81 +117,104 @@ test('tutorial renders more than 10 KaTeX elements', async ({ page }) => {
   expect(count).toBeGreaterThan(10);
 });
 
-test('dragging a joint tip changes editor values', async ({ page }) => {
+/** Pause playback (so joints stay put) and return the canvas box. */
+async function pauseAndBox(page, selector) {
+  await page.evaluate(() => window.fourierDemo.store.set({ playing: false }, 'test'));
+  // Views ease their auto-fit zoom/axes in over several frames; wait until the
+  // drawn joints and stem heads stop moving before aiming the mouse at them.
+  await page.waitForFunction(() => {
+    const d = window.fourierDemo;
+    const snap = JSON.stringify([d.armView.jointsPx(), d.spectrumView.stemHeads()]);
+    const same = snap === window.__lastSnap;
+    window.__lastSnap = snap;
+    return same;
+  }, null, { polling: 200, timeout: 10_000 });
+  await page.locator(selector).scrollIntoViewIfNeeded();
+  const box = await page.locator(selector).boundingBox();
+  expect(box, `${selector} must have a bounding box`).toBeTruthy();
+  return box;
+}
+
+const comps = (page) =>
+  page.evaluate(() => window.fourierDemo.store.get().components.map((c) => ({ ...c })));
+
+test('dragging a joint tip rotates that bone, keeps upstream fixed, and updates the editor', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
-  await page.waitForTimeout(150);
+  const box = await pauseAndBox(page, '#arm-canvas');
 
-  const canvas = page.locator('#arm-canvas');
-  const box = await canvas.boundingBox();
-  expect(box, '#arm-canvas must have a bounding box').toBeTruthy();
-  const cx = box.x + box.width / 2;
-  const cy = box.y + box.height / 2;
+  const before = await comps(page);
+  const editorBefore = await allEditorNumbers(page);
+  const joints = await page.evaluate(() => window.fourierDemo.armView.jointsPx());
+  expect(joints.length).toBe(before.length + 1);
 
-  const before = await allEditorNumbers(page);
-  expect(before.length, '#editor should list at least one numeric input').toBeGreaterThan(0);
+  // Drag the elbow (tip of link 0, the upper arm) perpendicular to the bone.
+  const base = joints[0];
+  const tip = joints[1];
+  const dx = tip.x - base.x;
+  const dy = tip.y - base.y;
+  const len = Math.hypot(dx, dy);
+  const nx = -dy / len;
+  const ny = dx / len;
+  await page.mouse.move(box.x + tip.x, box.y + tip.y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + tip.x + nx * 40, box.y + tip.y + ny * 40, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(100);
 
-  // Probe a small grid of plausible joint-tip offsets from the arm's origin
-  // (world origin is conventionally mapped to canvas center per plan.md's
-  // makeTransform(center, scale)).
-  const offsets = [
-    [60, 0], [0, 60], [-60, 0], [0, -60],
-    [90, 40], [-90, 40], [90, -40], [-90, -40],
-    [120, 0], [0, 120],
-  ];
-
-  let changed = false;
-  for (const [dx, dy] of offsets) {
-    const sx = cx + dx;
-    const sy = cy + dy;
-    await page.mouse.move(sx, sy);
-    await page.mouse.down();
-    await page.mouse.move(sx + 25, sy + 15, { steps: 5 });
-    await page.mouse.up();
-    await page.waitForTimeout(50);
-    const after = await allEditorNumbers(page);
-    if (JSON.stringify(after) !== JSON.stringify(before)) {
-      changed = true;
-      break;
-    }
+  const after = await comps(page);
+  // Skin mode (default): plain drag rotates only; bone length (amp) is preserved.
+  expect(after[0].amp).toBeCloseTo(before[0].amp, 9);
+  expect(Math.abs(after[0].phase - before[0].phase)).toBeGreaterThan(0.1);
+  // Downstream links keep their own coefficients (they ride along rigidly).
+  for (let i = 1; i < before.length; i++) {
+    expect(after[i].amp).toBeCloseTo(before[i].amp, 9);
+    expect(after[i].phase).toBeCloseTo(before[i].phase, 9);
   }
+  // The shoulder stays where it was, and the rest of the chain is still attached.
+  const jointsAfter = await page.evaluate(() => window.fourierDemo.armView.jointsPx());
+  expect(jointsAfter[0].x).toBeCloseTo(base.x, 1);
+  expect(jointsAfter[0].y).toBeCloseTo(base.y, 1);
+  expect(await allEditorNumbers(page)).not.toEqual(editorBefore);
 
-  expect(changed, 'dragging the arm canvas at every probed offset left #editor values unchanged').toBe(true);
+  // Shift-drag outward changes the bone length.
+  const t1 = jointsAfter[1];
+  const ux = (t1.x - base.x) / Math.hypot(t1.x - base.x, t1.y - base.y);
+  const uy = (t1.y - base.y) / Math.hypot(t1.x - base.x, t1.y - base.y);
+  await page.keyboard.down('Shift');
+  await page.mouse.move(box.x + t1.x, box.y + t1.y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + t1.x + ux * 30, box.y + t1.y + uy * 30, { steps: 8 });
+  await page.mouse.up();
+  await page.keyboard.up('Shift');
+  await page.waitForTimeout(100);
+  const afterShift = await comps(page);
+  expect(afterShift[0].amp).toBeGreaterThan(after[0].amp * 1.05);
 });
 
-test('dragging a spectrum stem changes an editor amplitude value', async ({ page }) => {
+test('dragging a spectrum stem upward increases that component amplitude', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
-  await page.waitForTimeout(150);
+  const box = await pauseAndBox(page, '#spectrum-canvas');
 
-  const canvas = page.locator('#spectrum-canvas');
-  const box = await canvas.boundingBox();
-  expect(box, '#spectrum-canvas must have a bounding box').toBeTruthy();
-  const cx = box.x + box.width / 2;
-  const bottomish = box.y + box.height * 0.7;
+  const before = await comps(page);
+  const editorBefore = await allEditorNumbers(page);
+  const heads = await page.evaluate(() => window.fourierDemo.spectrumView.stemHeads());
+  expect(heads.length).toBe(before.length);
 
-  const before = await allEditorNumbers(page);
-  expect(before.length, '#editor should list at least one numeric input').toBeGreaterThan(0);
+  const h = heads[heads.length - 1]; // smallest-amplitude component
+  await page.mouse.move(box.x + h.x, box.y + h.y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + h.x, box.y + h.y - 40, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(100);
 
-  // Probe a handful of x-offsets (integer-frequency stems near DC) and drag
-  // vertically (amplitude) at each.
-  const xOffsets = [0, 20, -20, 40, -40, 60, -60];
-  let changed = false;
-  for (const dx of xOffsets) {
-    const sx = cx + dx;
-    await page.mouse.move(sx, bottomish);
-    await page.mouse.down();
-    await page.mouse.move(sx, bottomish - 60, { steps: 5 });
-    await page.mouse.up();
-    await page.waitForTimeout(50);
-    const after = await allEditorNumbers(page);
-    if (JSON.stringify(after) !== JSON.stringify(before)) {
-      changed = true;
-      break;
-    }
-  }
-
-  expect(changed, 'dragging the spectrum canvas at every probed x-offset left #editor values unchanged').toBe(true);
+  const after = await comps(page);
+  const b = before.find((c) => c.id === h.id);
+  const a = after.find((c) => c.id === h.id);
+  expect(a.amp).toBeGreaterThan(b.amp);
+  expect(a.freq).toBe(b.freq); // purely vertical drag must not change frequency
+  expect(await allEditorNumbers(page)).not.toEqual(editorBefore);
 });
 
 test('draw mode: freehand heart-ish shape, then K=5 and K=100', async ({ page }) => {

@@ -18,6 +18,7 @@ const SCALE_EASE = 0.12; // per-render lerp factor for autofit scale (frozen whi
  *          anatomical arm (armSkin.js) with bones drawn thin/translucent on top.
  */
 export function createArmView(canvas, store, opts = {}) {
+  let lastJointsCss = [];
   const {
     interactive = true,
     showTrace = true,
@@ -96,6 +97,10 @@ export function createArmView(canvas, store, opts = {}) {
     ctx.translate(w / 2, h / 2);
 
     const pts = jointPositions(components, state.t, { re: 0, im: 0 });
+    lastJointsCss = pts.map((p) => {
+      const q = tf.toPx(p);
+      return { x: q.x + cv.w / 2, y: q.y + cv.h / 2 };
+    });
 
     // Faint full-period path.
     if (derived && derived.path && derived.path.length >= 4) {
@@ -337,5 +342,10 @@ export function createArmView(canvas, store, opts = {}) {
     cv.destroy();
   }
 
-  return { render, resize, destroy };
+  /** Joint positions from the last render, in CSS px relative to the canvas's top-left (p_0 = base). */
+  function jointsPx() {
+    return lastJointsCss.map((p) => ({ ...p }));
+  }
+
+  return { render, resize, destroy, jointsPx };
 }

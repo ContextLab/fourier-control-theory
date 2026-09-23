@@ -21,6 +21,18 @@ const BLEND = 0.22; // fraction of each bone's own parameter range blended towar
 // Per-bone-type half-width profiles: [u, fraction] control points, u in [0,1]
 // along the bone from its proximal (near-body) end to its distal (far) end.
 // Values are fractions of that bone's widthScale (see boneWidthScale()).
+// Base half-width, as a fraction of the bone's OWN length, at each bone
+// type's widest profile point (fraction 1.0). Hands are proportionally
+// short-and-wide; limbs and fingers are proportionally long-and-narrow.
+const PROPORTIONS = {
+  upperArm: 0.3,
+  forearm: 0.26,
+  hand: 0.45,
+  phalanx1: 0.32,
+  phalanx2: 0.3,
+  tentacle: 0.3,
+};
+
 const PROFILES = {
   upperArm: [
     [0, 1.0],
@@ -161,8 +173,13 @@ function buildBoneGeom(jointsPx, unit) {
     prevDir = dir;
     const nrm = normalOf(dir);
     const type = boneTypeFor(i);
-    const lenFactor = clamp(length / (unit || 1), 0.35, 1.8);
-    let widthScale = unit * (0.55 + 0.45 * Math.sqrt(lenFactor));
+    // Width tracks this bone's OWN length (so short finger segments read as
+    // narrow, not as fat as the upper arm) — a global-size floor/ceiling
+    // (tied to the whole chain's average bone length) only rescues bones
+    // that have collapsed to near-zero length in the current pose, so they
+    // don't vanish into needles.
+    const effectiveLen = clamp(length, unit * 0.15, unit * 2.2);
+    let widthScale = effectiveLen * PROPORTIONS[type];
     if (i >= 5) widthScale *= Math.pow(0.82, i - 4);
     bones.push({ p0, p1, dir, nrm, length, type, profile: PROFILES[type], widthScale });
   }
@@ -241,24 +258,33 @@ export function drawArmSkin(ctx, jointsPx, opts = {}) {
   const shoulderNormal = jointNormal[0];
   const shoulderWidth = jointWidth[0];
 
+  const backDir = { x: -bones[0].dir.x, y: -bones[0].dir.y };
+  const backNormal = { x: -shoulderNormal.x, y: -shoulderNormal.y };
+  const rightRev = rightPts.slice().reverse();
+
+  /** Traces the full tube outline: left side base->tip, round tip cap, right side tip->base, round base cap. */
+  function traceTube() {
+    ctx.moveTo(leftPts[0].x, leftPts[0].y);
+    curveThrough(ctx, leftPts.slice(1));
+    drawRoundCap(ctx, tipPoint, tipNormal, tipDir, tipWidth);
+    curveThrough(ctx, rightRev);
+    drawRoundCap(ctx, shoulderPoint, backNormal, backDir, shoulderWidth);
+  }
+
   ctx.save();
   if (xray) ctx.globalAlpha = 0.55;
 
   // Shoulder / torso stub, drawn first so the tube overlaps it cleanly.
-  const stubCenter = add(shoulderPoint, scale(bones[0].dir, -shoulderWidth * 0.5));
+  const stubCenter = add(shoulderPoint, scale(bones[0].dir, -shoulderWidth * 0.9));
   const stubAngle = Math.atan2(bones[0].dir.y, bones[0].dir.x);
   ctx.beginPath();
-  ctx.ellipse(stubCenter.x, stubCenter.y, shoulderWidth * 1.2, shoulderWidth * 1.55, stubAngle + Math.PI / 2, 0, Math.PI * 2);
+  ctx.ellipse(stubCenter.x, stubCenter.y, shoulderWidth * 1.1, shoulderWidth * 1.4, stubAngle + Math.PI / 2, 0, Math.PI * 2);
   ctx.fillStyle = colors.skin;
   ctx.fill();
 
-  // Main continuous tube: left side base->tip, round tip cap, right side tip->base.
+  // Main continuous tube: left side base->tip, round tip cap, right side tip->base, round base cap.
   ctx.beginPath();
-  ctx.moveTo(leftPts[0].x, leftPts[0].y);
-  curveThrough(ctx, leftPts.slice(1));
-  drawRoundCap(ctx, tipPoint, tipNormal, tipDir, tipWidth);
-  const rightRev = rightPts.slice().reverse();
-  curveThrough(ctx, rightRev);
+  traceTube();
   ctx.closePath();
 
   const grad = ctx.createLinearGradient(shoulderPoint.x, shoulderPoint.y, tipPoint.x, tipPoint.y);
@@ -279,10 +305,7 @@ export function drawArmSkin(ctx, jointsPx, opts = {}) {
 
   // Outline.
   ctx.beginPath();
-  ctx.moveTo(leftPts[0].x, leftPts[0].y);
-  curveThrough(ctx, leftPts.slice(1));
-  drawRoundCap(ctx, tipPoint, tipNormal, tipDir, tipWidth);
-  curveThrough(ctx, rightRev);
+  traceTube();
   ctx.closePath();
   ctx.strokeStyle = colors.outline;
   ctx.lineWidth = Math.max(1, unit * 0.04);

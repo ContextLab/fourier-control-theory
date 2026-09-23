@@ -6,15 +6,18 @@ amplitude, its constant spin rate is the component's frequency, and its starting
 the component's phase. Drag the arm and watch the spectrum update; drag the spectrum and
 watch the arm move; draw a shape freehand and watch it get rebuilt out of spinning links.
 
-Live site: **https://contextlab.github.io/fourier-control-theory/** (live once GitHub Pages
-is enabled for this repository).
+Live site: **https://context-lab.com/fourier-control-theory/**
 
 No build step: plain HTML, CSS, and ES modules, rendered on `<canvas>`.
 
 ## Features
 
 - **Arm tab** — an animated chain of links (the "puppet") next to its amplitude/power
-  spectrum. Drag a joint's tip and every link further out on the chain follows rigidly.
+  spectrum. By default the chain is drawn as a human arm: the five components are the
+  bones (upper arm, forearm, hand, finger, fingertip) and a vector "skin" deforms around
+  them at the shoulder, elbow, wrist, and knuckles. Drag any joint and that bone rotates
+  while everything further out follows rigidly; shift-drag to change the bone's length
+  (its amplitude) as well. With the skin toggled off, a plain drag changes both.
   Drag a spectrum stem vertically to change its amplitude, horizontally to change its
   frequency, or use the phase ring to change its phase. Double-click empty space in the
   spectrum to add a component; shift-drop one stem onto another to merge them.
@@ -27,8 +30,8 @@ No build step: plain HTML, CSS, and ES modules, rendered on `<canvas>`.
   low-pass approximation, and a feedback-lag toggle that applies a first-order lag filter
   `H(f) = 1 / (1 + i f / f_c)` to every component.
 - **Component editor** — an explicit list of components (frequency, amplitude, phase) with
-  add/remove controls and shape presets (circle, ellipse, square wave, sawtooth, star,
-  heart).
+  add/remove controls and shape presets (human arm, circle, ellipse, square wave, sawtooth,
+  star, heart).
 - **Tutorial** — a written walkthrough (rendered with KaTeX) of the Fourier-analysis math,
   the control-theory background, and the correspondence between them.
 - Light/dark theme toggle, HiDPI canvases, and pointer events that work with touch.
@@ -58,9 +61,15 @@ End-to-end tests drive a real Chromium browser with Playwright, covering each ta
 spectrum dragging, the draw-and-reconstruct flow, the control tab, and a console-error check:
 
 ```sh
+npm install
 npx playwright install chromium
 npm run test:e2e
 ```
+
+The page exposes `window.fourierDemo = { store, armView, spectrumView }`. The end-to-end
+tests use it to find where joints and spectrum stems are drawn (`armView.jointsPx()`,
+`spectrumView.stemHeads()`), then drag them with the real mouse. It's also handy in the
+browser console, e.g. `fourierDemo.store.get().components`.
 
 ## Code architecture
 
@@ -73,10 +82,11 @@ npm run test:e2e
 | `js/core/complex.js` | Pure complex-number arithmetic: add, sub, mul, scale, abs, arg, `e^{i\theta}` |
 | `js/core/fourier.js` | Pure Fourier math: arc-length resampling, DFT, inverse evaluation, top-K selection, low-pass filtering |
 | `js/core/arm.js` | Pure arm kinematics: joint positions, joint angles (absolute and relative), drag inversion, path sampling |
-| `js/core/presets.js` | Shape presets (circle, ellipse, square, sawtooth, star, heart) expressed as component lists |
+| `js/core/presets.js` | Shape presets (human arm, circle, ellipse, square, sawtooth, star, heart) expressed as component lists |
 | `js/core/store.js` | Application state, subscriptions, and a lazily-recomputed derived cache — no DOM code |
 | `js/ui/canvas.js` | HiDPI canvas setup and world-to-pixel coordinate transforms |
-| `js/ui/armView.js` | Renders the arm/epicycles/trace and handles joint dragging |
+| `js/ui/armView.js` | Renders the arm/epicycles/trace and handles joint dragging; exposes `jointsPx()` |
+| `js/ui/armSkin.js` | Draws the anatomical arm: one continuous skin outline built around the bone chain, blended at each joint |
 | `js/ui/spectrumView.js` | Renders the stem plot and handles stem dragging (amplitude, frequency, phase) |
 | `js/ui/drawView.js` | Freehand capture and the epicycle reconstruction animation |
 | `js/ui/jointPlot.js` | Joint-angle-vs-time plot and the control-theory overlays (bandwidth, lag filter, mini Bode plot) |

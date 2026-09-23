@@ -167,3 +167,36 @@ test('setComponents and addComponent preserve an unknown extra field like "label
   const patched = store.get().components.find((c) => c.id === id);
   assert.equal(patched.label, 'Forearm');
 });
+
+test('id-less components (initial, setComponents, set) get unique ids and colors', () => {
+  const store = createStore({ components: [{ freq: 1, amp: 0.5, phase: 0 }, { freq: 2, amp: 0.5, phase: 0 }] });
+  let ids = store.get().components.map((c) => c.id);
+  assert.equal(new Set(ids).size, 2);
+  assert.ok(ids.every((id) => Number.isInteger(id)));
+  assert.ok(store.get().components.every((c) => typeof c.color === 'string'));
+
+  store.setComponents([{ freq: 1, amp: 0.3, phase: 0 }, { freq: 3, amp: 0.3, phase: 0 }, { freq: 5, amp: 0.3, phase: 0 }]);
+  ids = store.get().components.map((c) => c.id);
+  assert.equal(new Set(ids).size, 3);
+
+  // Removing one must remove exactly one.
+  store.removeComponent(ids[1]);
+  assert.deepEqual(store.get().components.map((c) => c.freq), [1, 5]);
+
+  store.set({ components: [{ freq: 7, amp: 1, phase: 0 }] });
+  assert.ok(Number.isInteger(store.get().components[0].id));
+
+  // A later addComponent never collides with an existing id.
+  const newId = store.addComponent({ freq: 2 });
+  const all = store.get().components.map((c) => c.id);
+  assert.equal(new Set(all).size, all.length);
+  assert.ok(all.includes(newId));
+});
+
+test('duplicate ids in a supplied list are de-duplicated', () => {
+  const store = createStore();
+  store.setComponents([{ id: 4, freq: 1, amp: 1, phase: 0 }, { id: 4, freq: 2, amp: 1, phase: 0 }]);
+  const ids = store.get().components.map((c) => c.id);
+  assert.equal(ids[0], 4);
+  assert.notEqual(ids[1], 4);
+});

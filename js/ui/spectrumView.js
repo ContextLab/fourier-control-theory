@@ -496,5 +496,10 @@ export function createSpectrumView(canvas, store, opts = {}) {
     cv.destroy();
   }
 
-  return { render, resize, destroy };
+  /** Stem heads from the last render, in CSS px relative to the canvas's top-left. */
+  function stemHeads() {
+    return lastStems.map((st) => ({ id: st.id, freq: st.freq, x: st.headX, y: st.headY, baseY: st.baseY }));
+  }
+
+  return { render, resize, destroy, stemHeads };
 }
