@@ -1,34 +1,37 @@
 /**
- * Stylized vector "skin" rendering for the robot-arm puppet. Given pixel-space
- * joint positions (the Fourier-component "bones"), draws a smooth, shaded
- * human-arm-like silhouette that deforms continuously as the joints move —
- * shoulder -> upper arm -> forearm -> palm (with thumb) -> a fanned set of
- * fingers (index driven by the real Finger/Fingertip bones, the other three
- * rigidly following its angles) -> fingertip, with any additional bones
- * drawn as tapering tentacle-like continuations. Pure Canvas 2D vector
- * paths; no images.
+ * Stylized vector "metallic shell" rendering for the robot-arm puppet. Given
+ * pixel-space joint positions for the 3-bone main chain (shoulder -> elbow ->
+ * wrist -> palm) and, separately, the 5 real finger chains (each 3 joints,
+ * from core/gesture.js's forward kinematics), draws a smooth, shaded
+ * robotic-arm-and-hand silhouette that deforms continuously as the joints
+ * move. Pure Canvas 2D vector paths; no images.
  *
  * Anatomical proportions (upper arm, forearm, palm, finger widths) are all
  * derived from a single global scale — `armScale`, the pixel length of the
  * upper-arm + forearm bones — rather than each bone's own length. This is
  * what keeps the hand and fingers slender and readable even though their
- * *own* Fourier amplitudes (and therefore bone lengths) are small and
- * rotate independently: a short, oddly-angled finger bone still gets a
- * finger-sized width instead of inflating into a round blob.
+ * *own* lengths (and, in gesture mode, their own independent rotation) are
+ * small and change continuously.
  *
- * All pieces (limb tube, palm, thumb, fingers) are built as `Path2D` objects
+ * All pieces (limb tube, palm, 5 real fingers) are built as `Path2D` objects
  * and rendered as a single opaque union: every outline is stroked FIRST (at
  * double the visible width), then every piece is filled solid on top.
  * Because the fill exactly covers the inner half of its own stroke, only the
  * half that isn't covered by *some* piece's fill survives — i.e. the
  * outline of the boolean union, with no seams where pieces overlap.
+ *
+ * The "skin" itself is a brushed-steel gradient (dark -> light -> dark, one
+ * shared CanvasGradient reused for every fill) with a thin specular
+ * highlight stroke along each tube and small rivet-like joint caps, giving a
+ * robotic-shell look rather than an organic one.
  * @module ui/armSkin
  */
 
 const DEFAULT_COLORS = {
-  skin: '#e3ac81',
-  skinShade: '#b17a51',
-  outline: '#5c3524',
+  skin: '#9aa3ad',
+  skinShade: '#5b636c',
+  skinHighlight: '#e7ebef',
+  outline: '#2b3138',
   bone: '#8a6996',
 };
 
@@ -37,14 +40,10 @@ const BLEND = 0.22; // fraction of each bone's own parameter range blended towar
 const MIN_HALF_PX = 8; // absolute floor on every drawn half-width, in the same px space as joint handles (radius <= 7px)
 
 // -- Anatomical taper tables, all expressed as a FRACTION OF `armScale` (the
-// combined pixel length of the upper-arm + forearm bones) rather than of
-// each bone's own length. [u, fraction] control points, u in [0,1] along
-// the piece from its proximal (near-body) end to its distal (far) end.
+// combined pixel length of the upper-arm + forearm bones). [u, fraction]
+// control points, u in [0,1] along the piece from its proximal to distal end.
 
 const LIMB_PROFILES = {
-  // Deltoid -> bicep -> narrowing toward the elbow. No separate shoulder
-  // "cap" ellipse is drawn (that read as a bulbous knob); the taper itself
-  // plus the round end-cap sells the shoulder.
   upperArm: [
     [0, 0.16],
     [0.15, 0.148],
@@ -52,7 +51,6 @@ const LIMB_PROFILES = {
     [0.85, 0.1],
     [1, 0.09],
   ],
-  // Elbow -> forearm muscle -> narrow wrist.
   forearm: [
     [0, 0.09],
     [0.25, 0.085],
@@ -61,42 +59,26 @@ const LIMB_PROFILES = {
   ],
 };
 
-// Palm: a slender trapezoid (narrower at the wrist, a touch wider across
-// the knuckles) with rounded corners (from the joint-cap circles). Kept
-// narrow relative to the limb and to the fingers' reach past it, so the
-// fingers read as fingers rather than being swallowed into a fat mitt.
+// Palm: a slender trapezoid (narrower at the wrist, a touch wider across the
+// knuckles).
 const PALM_PROFILE = [
   [0, 0.062],
   [0.4, 0.082],
   [1, 0.078],
 ];
 
-// Finger phalanges: narrow and only mildly tapered (~0.2-0.3x palm width).
+// Finger phalanges: narrow and only mildly tapered. Thumb gets its own,
+// slightly stouter profile.
 const FINGER_PROFILES = {
-  phalanx1: [
-    [0, 0.034],
-    [1, 0.027],
-  ],
-  phalanx2: [
-    [0, 0.026],
-    [1, 0.018],
-  ],
+  phalanx1: [[0, 0.034], [1, 0.028]],
+  phalanx2: [[0, 0.027], [1, 0.021]],
+  phalanx3: [[0, 0.02], [1, 0.014]],
 };
-
-const THUMB_PROFILE = [
-  [0, 0.036],
-  [1, 0.026],
-];
-
-// Per-finger variety for the three siblings that fan out alongside the real
-// (index) finger: [lengthScale, extraAngle (rad, rigid rotation of the
-// whole finger about its own base), lateralSlots (how many finger-spacings
-// from the index finger's real anchor, toward the thumb-opposite side)].
-const SIBLING_FINGERS = [
-  { lengthScale: 1.04, extraAngle: 0.02, slots: 1, widthScale: 0.95 }, // middle
-  { lengthScale: 0.92, extraAngle: -0.06, slots: 2, widthScale: 0.88 }, // ring
-  { lengthScale: 0.76, extraAngle: -0.14, slots: 3, widthScale: 0.78 }, // pinky
-];
+const THUMB_PROFILES = {
+  phalanx1: [[0, 0.04], [1, 0.032]],
+  phalanx2: [[0, 0.03], [1, 0.023]],
+  phalanx3: [[0, 0.022], [1, 0.015]],
+};
 
 // -- small vector helpers -----------------------------------------------
 
@@ -106,8 +88,8 @@ function sub(a, b) {
 function add(a, b) {
   return { x: a.x + b.x, y: a.y + b.y };
 }
-function scale(a, s) {
-  return { x: a.x * s, y: a.y * s };
+function scale(a, sc) {
+  return { x: a.x * sc, y: a.y * sc };
 }
 function lerp(a, b, u) {
   return { x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u };
@@ -115,20 +97,12 @@ function lerp(a, b, u) {
 function vlen(a) {
   return Math.hypot(a.x, a.y);
 }
-function dot(a, b) {
-  return a.x * b.x + a.y * b.y;
-}
 function safeNorm(a, fallback) {
   const l = vlen(a);
   return l > 1e-9 ? { x: a.x / l, y: a.y / l } : fallback;
 }
 function normalOf(dir) {
   return { x: -dir.y, y: dir.x };
-}
-function rotate(dir, angle) {
-  const c = Math.cos(angle);
-  const s = Math.sin(angle);
-  return { x: dir.x * c - dir.y * s, y: dir.x * s + dir.y * c };
 }
 function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
@@ -188,9 +162,7 @@ function circlePath(center, r) {
 }
 
 /**
- * Build a tapered tube through an explicit chain of points (not necessarily
- * the raw joint chain — used both for the real bone chain and for the
- * fan-out sibling fingers, which are rigid copies anchored elsewhere).
+ * Build a tapered tube through an explicit chain of points.
  * @param {{x:number,y:number}[]} points - length segCount + 1
  * @param {{x:number,y:number}[]} dirs - unit directions, length segCount
  * @param {(seg:number, u:number) => number} widthAt - half-width for segment `seg` at param u in [0,1]
@@ -218,8 +190,8 @@ function buildTube(points, dirs, widthAt, minHalf, maxHalf) {
     const p0 = points[k];
     const p1 = points[k + 1];
     const startS = k === 0 ? 0 : 1;
-    for (let s = startS; s <= SAMPLES_PER_BONE; s++) {
-      const u = s / SAMPLES_PER_BONE;
+    for (let sIdx = startS; sIdx <= SAMPLES_PER_BONE; sIdx++) {
+      const u = sIdx / SAMPLES_PER_BONE;
       const a0 = u < BLEND ? 1 - smoothstep(u / BLEND) : 0;
       const a1 = u > 1 - BLEND ? smoothstep((u - (1 - BLEND)) / BLEND) : 0;
       const aOwn = 1 - a0 - a1;
@@ -249,9 +221,23 @@ function tubeToPath(tube, startCap, endCap) {
   return path;
 }
 
+/** Per-bone unit directions through a chain of points, guarding zero-length segments. */
+function dirsThrough(points) {
+  const dirs = [];
+  let prevDir = { x: 1, y: 0 };
+  for (let i = 0; i < points.length - 1; i++) {
+    const raw = sub(points[i + 1], points[i]);
+    const len = vlen(raw);
+    const d = len > 1e-6 ? { x: raw.x / len, y: raw.y / len } : prevDir;
+    prevDir = d;
+    dirs.push(d);
+  }
+  return dirs;
+}
+
 /**
- * `true` iff every component carries a `label` string — i.e. this is the
- * anatomical human-arm preset (as opposed to an arbitrary Fourier chain),
+ * `true` iff every component carries a `label` string — i.e. this is one of
+ * the anatomical human-arm chains (as opposed to an arbitrary Fourier chain),
  * the only case in which the skin should be drawn.
  * @param {Array<object>} components
  * @returns {boolean}
@@ -261,46 +247,40 @@ export function isAnatomical(components) {
     && components.every((c) => c && typeof c.label === 'string');
 }
 
+const FINGER_ORDER = ['thumb', 'index', 'middle', 'ring', 'little'];
+
 /**
- * Draw a stylized vector human-arm skin over the given chain of joints.
+ * Draw a stylized metallic-shell skin over the 3-bone main chain plus 5 real
+ * finger chains.
  * @param {CanvasRenderingContext2D} ctx
- * @param {{x:number,y:number}[]} jointsPx - pixel positions p_0 (shoulder) .. p_n (tip)
+ * @param {{x:number,y:number}[]} mainJointsPx - [shoulder, elbow, wrist, palmTip], px
+ * @param {Object<string, {x:number,y:number}[]>} fingerJointsPx - per finger
+ *   name, [base, j1, j2, j3] px (4 points = 3 phalanx segments) OR
+ *   [base, j1, j2] px (3 points = 2 segments, spin mode's index-driven
+ *   overlay); any missing finger is simply skipped. Each finger is always
+ *   built as its own separate Path2D piece — never merged with another
+ *   finger — so gaps between them stay visible even where their strokes
+ *   nearly touch.
  * @param {{scalePx?:number, colors?:object, xray?:boolean, selectedIndex?:number}} [opts]
+ *   selection/hover handles for individual joints (main or finger) are drawn
+ *   by the caller (armView.js), not here.
  */
-export function drawArmSkin(ctx, jointsPx, opts = {}) {
-  if (!Array.isArray(jointsPx) || jointsPx.length < 2 || jointsPx.some((p) => !isFinitePt(p))) {
+export function drawArmSkin(ctx, mainJointsPx, fingerJointsPx = {}, opts = {}) {
+  if (!Array.isArray(mainJointsPx) || mainJointsPx.length < 2 || mainJointsPx.some((p) => !isFinitePt(p))) {
     return;
   }
   const colors = { ...DEFAULT_COLORS, ...(opts.colors || {}) };
   const xray = !!opts.xray;
-  const n = jointsPx.length - 1;
+  const n = mainJointsPx.length - 1; // number of main bones present (1..3)
 
-  // Per-bone unit directions (guarding zero-length bones by reusing the
-  // previous direction, so a degenerate pose never divides by zero).
-  const dirs = [];
-  {
-    let prevDir = { x: 1, y: 0 };
-    for (let i = 0; i < n; i++) {
-      const raw = sub(jointsPx[i + 1], jointsPx[i]);
-      const len = vlen(raw);
-      const d = len > 1e-6 ? { x: raw.x / len, y: raw.y / len } : prevDir;
-      prevDir = d;
-      dirs.push(d);
-    }
-  }
+  const dirs = dirsThrough(mainJointsPx);
 
-  // Global scale: the upper-arm + forearm pixel length when both are
-  // present. Every other piece's width is a fraction of THIS, not of its
-  // own (possibly tiny, independently-rotating) bone length — that's what
-  // keeps a short, oddly-angled hand/finger bone reading as a slender hand
-  // or finger instead of inflating into a round blob.
+  // Global scale: the upper-arm + forearm pixel length when both are present.
   let armScale;
   if (n >= 2) {
-    armScale = vlen(sub(jointsPx[1], jointsPx[0])) + vlen(sub(jointsPx[2], jointsPx[1]));
-  } else if (n === 1) {
-    armScale = vlen(sub(jointsPx[1], jointsPx[0])) * 2;
+    armScale = vlen(sub(mainJointsPx[1], mainJointsPx[0])) + vlen(sub(mainJointsPx[2], mainJointsPx[1]));
   } else {
-    armScale = 0;
+    armScale = vlen(sub(mainJointsPx[1], mainJointsPx[0])) * 2;
   }
   if (!(armScale > 1e-6)) armScale = opts.scalePx ? opts.scalePx * 0.8 : 80;
   armScale = clamp(armScale, 16, 1600);
@@ -309,11 +289,11 @@ export function drawArmSkin(ctx, jointsPx, opts = {}) {
   const MAX_HALF = Math.max(armScale * 0.6, MIN_HALF);
 
   const pieces = []; // Path2D list: stroked (outline) then filled (opaque union)
-  const capPieces = []; // small circular seam-blend caps, filled only
+  const capPieces = []; // small circular seam-blend / rivet caps, filled only
 
   // -- Upper arm (+ forearm): one continuous tapered tube ------------------
   const limbCount = Math.min(n, 2);
-  const limbPoints = jointsPx.slice(0, limbCount + 1);
+  const limbPoints = mainJointsPx.slice(0, limbCount + 1);
   const limbDirs = dirs.slice(0, limbCount);
   const limbWidthAt = (seg, u) => {
     const profile = seg === 0 ? LIMB_PROFILES.upperArm : LIMB_PROFILES.forearm;
@@ -321,206 +301,161 @@ export function drawArmSkin(ctx, jointsPx, opts = {}) {
   };
   const limbTube = buildTube(limbPoints, limbDirs, limbWidthAt, MIN_HALF, MAX_HALF);
   const shoulderCap = {
-    center: jointsPx[0],
+    center: mainJointsPx[0],
     normal: limbTube.jointNormal[0],
     dir: { x: -limbDirs[0].x, y: -limbDirs[0].y },
     width: limbTube.jointWidth[0],
   };
-  const hasHand = n >= 3;
-  const limbTipCap = hasHand
+  const hasPalm = n >= 3;
+  const limbTipCap = hasPalm
     ? null
-    : { center: jointsPx[limbCount], normal: limbTube.jointNormal[limbCount], dir: limbDirs[limbCount - 1], width: limbTube.jointWidth[limbCount] };
+    : { center: mainJointsPx[limbCount], normal: limbTube.jointNormal[limbCount], dir: limbDirs[limbCount - 1], width: limbTube.jointWidth[limbCount] };
   pieces.push(tubeToPath(limbTube, shoulderCap, limbTipCap));
-  if (limbCount === 2) capPieces.push(circlePath(jointsPx[1], limbTube.jointWidth[1] * 1.05));
+  if (limbCount === 2) capPieces.push(circlePath(mainJointsPx[1], limbTube.jointWidth[1] * 1.05));
 
   // -- Palm: a rounded trapezoid from the wrist to the knuckles ------------
   let palmTube = null;
   let handDir = null;
-  let knuckleNormal = null;
-  if (hasHand) {
+  if (hasPalm) {
     handDir = dirs[2];
-    knuckleNormal = normalOf(handDir);
-    const palmPoints = jointsPx.slice(2, 4);
+    const palmPoints = mainJointsPx.slice(2, 4);
     const palmWidthAt = (_seg, u) => armScale * profileAt(PALM_PROFILE, u);
     palmTube = buildTube(palmPoints, [handDir], palmWidthAt, MIN_HALF, MAX_HALF);
-    const hasFingers = n >= 4;
-    const knuckleCap = hasFingers ? null : { center: jointsPx[3], normal: palmTube.jointNormal[1], dir: handDir, width: palmTube.jointWidth[1] };
+    const hasFingers = Object.keys(fingerJointsPx).length > 0;
+    const knuckleCap = hasFingers ? null : { center: mainJointsPx[3], normal: palmTube.jointNormal[1], dir: handDir, width: palmTube.jointWidth[1] };
     pieces.push(tubeToPath(palmTube, null, knuckleCap));
-    capPieces.push(circlePath(jointsPx[2], palmTube.jointWidth[0] * 1.05));
+    capPieces.push(circlePath(mainJointsPx[2], palmTube.jointWidth[0] * 1.05));
   }
 
-  // -- Thumb: rigid child of the palm, angled off to one side --------------
-  let thumbDir = null;
-  if (hasHand) {
-    const wrist = jointsPx[2];
-    const knuckle = jointsPx[3];
-    const thumbBase = lerp(wrist, knuckle, 0.32);
-    thumbDir = rotate(handDir, -1.0);
-    const thumbLen = armScale * 0.15;
-    const thumbTip = add(thumbBase, scale(thumbDir, thumbLen));
-    const thumbWidthAt = (_seg, u) => armScale * profileAt(THUMB_PROFILE, u);
-    const thumbTube = buildTube([thumbBase, thumbTip], [thumbDir], thumbWidthAt, MIN_HALF * 0.9, MAX_HALF);
-    const thumbTipCap = { center: thumbTip, normal: thumbTube.jointNormal[1], dir: thumbDir, width: thumbTube.jointWidth[1] };
-    pieces.push(tubeToPath(thumbTube, null, thumbTipCap));
-    capPieces.push(circlePath(thumbBase, thumbTube.jointWidth[0] * 1.1));
-  }
-
-  // -- Fingers: the real (index) finger follows bones 3 (Finger) and 4
-  // (Fingertip) exactly — so their draggable joint handles stay visible and
-  // inside the skin — while three rigid sibling fingers fan out alongside
-  // it, reusing the SAME proximal/distal angles with small offsets, so the
-  // hand reads as a hand with fingers rather than a single digit. Widths
-  // come from `armScale`, not from these (often tiny) bones' own length.
-  const fingerTips = []; // {point, dir} for fingernail placement (real finger only)
-  let realFingerLastIdx = -1;
-  if (hasHand && n >= 4) {
-    const fingerSegCount = Math.min(n - 3, 2); // 1 (phalanx1 only) or 2 (phalanx1+phalanx2)
-    const fingerPoints = jointsPx.slice(3, 3 + fingerSegCount + 1);
-    const fingerDirs = dirs.slice(3, 3 + fingerSegCount);
-    const fingerWidthAt = (seg, u) => {
-      const profile = seg === 0 ? FINGER_PROFILES.phalanx1 : FINGER_PROFILES.phalanx2;
-      return armScale * profileAt(profile, u);
+  // -- Fingers: 5 real chains (thumb + 4 fingers), each a 3-segment tapered
+  // tube through [base, j1, j2, j3]. Widths still come from `armScale`, not
+  // from these (often small) bones' own length.
+  if (hasPalm) {
+    const segProfiles = (name) => (name === 'thumb' ? THUMB_PROFILES : FINGER_PROFILES);
+    const profileForSeg = (name, seg, segCount) => {
+      const profiles = segProfiles(name);
+      // 2-segment fingers (spin mode's index-driven overlay) use the
+      // proximal + distal profiles; 3-segment fingers use all three.
+      if (segCount === 2) return seg === 0 ? profiles.phalanx1 : profiles.phalanx3;
+      return seg === 0 ? profiles.phalanx1 : seg === 1 ? profiles.phalanx2 : profiles.phalanx3;
     };
-    const fingerTube = buildTube(fingerPoints, fingerDirs, fingerWidthAt, MIN_HALF * 0.85, MAX_HALF);
-    const tipCap = {
-      center: fingerPoints[fingerSegCount],
-      normal: fingerTube.jointNormal[fingerSegCount],
-      dir: fingerDirs[fingerSegCount - 1],
-      width: fingerTube.jointWidth[fingerSegCount],
-    };
-    pieces.push(tubeToPath(fingerTube, null, tipCap));
-    capPieces.push(circlePath(jointsPx[3], fingerTube.jointWidth[0] * 1.05));
-    if (fingerSegCount === 2) capPieces.push(circlePath(jointsPx[4], fingerTube.jointWidth[1] * 1.05));
-    fingerTips.push({ point: fingerPoints[fingerSegCount], dir: fingerDirs[fingerSegCount - 1] });
-    realFingerLastIdx = 3 + fingerSegCount - 1;
-
-    // Sibling fingers (only once a full hand — palm + both phalanges — is
-    // present): rigid copies of the real finger's directions, anchored at
-    // evenly-spaced points along the knuckle line, fanning away from the
-    // thumb, with small per-finger length/angle variety.
-    if (fingerSegCount === 2) {
-      const thumbSide = thumbDir ? -Math.sign(dot(thumbDir, knuckleNormal)) || 1 : 1;
-      const spacing = armScale * 0.032;
-      const knuckle = jointsPx[3];
-      for (const sib of SIBLING_FINGERS) {
-        const base = add(knuckle, scale(knuckleNormal, thumbSide * spacing * sib.slots));
-        const dA = rotate(fingerDirs[0], sib.extraAngle);
-        const dB = rotate(fingerDirs[1], sib.extraAngle);
-        const lenA = vlen(sub(fingerPoints[1], fingerPoints[0])) * sib.lengthScale;
-        const lenB = vlen(sub(fingerPoints[2], fingerPoints[1])) * sib.lengthScale;
-        const pMid = add(base, scale(dA, lenA));
-        const pTip = add(pMid, scale(dB, lenB));
-        const sibWidthAt = (seg, u) => {
-          const profile = seg === 0 ? FINGER_PROFILES.phalanx1 : FINGER_PROFILES.phalanx2;
-          return armScale * profileAt(profile, u) * sib.widthScale;
-        };
-        const sibTube = buildTube([base, pMid, pTip], [dA, dB], sibWidthAt, MIN_HALF * 0.8, MAX_HALF);
-        const sibTipCap = { center: pTip, normal: sibTube.jointNormal[2], dir: dB, width: sibTube.jointWidth[2] };
-        pieces.push(tubeToPath(sibTube, null, sibTipCap));
-        capPieces.push(circlePath(base, sibTube.jointWidth[0] * 1.05));
-        capPieces.push(circlePath(pMid, sibTube.jointWidth[1] * 1.05));
-      }
+    for (const name of FINGER_ORDER) {
+      const pts = fingerJointsPx[name];
+      if (!Array.isArray(pts) || (pts.length !== 3 && pts.length !== 4) || pts.some((p) => !isFinitePt(p))) continue;
+      const segCount = pts.length - 1;
+      const fDirs = dirsThrough(pts);
+      const widthAt = (seg, u) => armScale * profileAt(profileForSeg(name, seg, segCount), u);
+      // Each finger is its own independent tube/Path2D — added as a separate
+      // entry in `pieces`, never merged with another finger's points — so
+      // it always keeps its own outline and a visible gap from its neighbors.
+      const tube = buildTube(pts, fDirs, widthAt, MIN_HALF * 0.8, MAX_HALF);
+      const tipIdx = segCount;
+      const tipCap = { center: pts[tipIdx], normal: tube.jointNormal[tipIdx], dir: fDirs[segCount - 1], width: tube.jointWidth[tipIdx] };
+      pieces.push(tubeToPath(tube, null, tipCap));
+      for (let k = 0; k < pts.length - 1; k++) capPieces.push(circlePath(pts[k], tube.jointWidth[k] * 1.05));
     }
   }
 
-  // -- Any bones beyond the fingertip: thin tapering tentacle continuation -
-  const tentacleStart = hasHand ? 3 + Math.min(n - 3, 2) : limbCount;
-  if (n > tentacleStart) {
-    const tentaclePoints = jointsPx.slice(tentacleStart, n + 1);
-    const tentacleDirs = dirs.slice(tentacleStart, n);
-    const baseWidth = armScale * 0.05;
-    const tentacleWidthAt = (seg, u) => baseWidth * Math.pow(0.82, seg) * (1 - 0.3 * u);
-    const tentacleTube = buildTube(tentaclePoints, tentacleDirs, tentacleWidthAt, MIN_HALF * 0.7, MAX_HALF);
-    const lastSeg = tentacleDirs.length - 1;
-    const tentacleTipCap = {
-      center: jointsPx[n],
-      normal: tentacleTube.jointNormal[tentacleDirs.length],
-      dir: tentacleDirs[lastSeg],
-      width: tentacleTube.jointWidth[tentacleDirs.length],
-    };
-    pieces.push(tubeToPath(tentacleTube, null, tentacleTipCap));
-    capPieces.push(circlePath(jointsPx[tentacleStart], tentacleTube.jointWidth[0] * 1.05));
+  // -- Metallic brushed-steel gradient, shared across every fill -----------
+  // Direction: perpendicular to the overall limb direction, so the
+  // highlight reads as a single consistent light source across the whole
+  // arm+hand rather than per-piece (much cheaper and reads more like one
+  // continuous metal shell). The gradient's extent is the full projected
+  // span of EVERY point being drawn (main chain + all 5 fingers) onto that
+  // axis, not just a small fixed radius near the elbow — otherwise a finger
+  // far from that radius samples past the gradient's last stop and renders
+  // as a flat, dark, disconnected-looking blob instead of matching the rest
+  // of the shell.
+  const overallDir = dirs[0] || { x: 1, y: 0 };
+  const overallNormal = normalOf(overallDir);
+  const gradOrigin = mainJointsPx[0];
+  const allDrawnPts = [...mainJointsPx];
+  for (const name of Object.keys(fingerJointsPx)) {
+    const pts = fingerJointsPx[name];
+    if (Array.isArray(pts)) for (const p of pts) if (isFinitePt(p)) allDrawnPts.push(p);
   }
+  let minProj = 0;
+  let maxProj = 0;
+  for (const p of allDrawnPts) {
+    const rel = sub(p, gradOrigin);
+    const proj = rel.x * overallNormal.x + rel.y * overallNormal.y;
+    if (proj < minProj) minProj = proj;
+    if (proj > maxProj) maxProj = proj;
+  }
+  const gradPad = Math.max(MAX_HALF * 0.4, (maxProj - minProj) * 0.12, 1);
+  const gradA = add(gradOrigin, scale(overallNormal, minProj - gradPad));
+  const gradB = add(gradOrigin, scale(overallNormal, maxProj + gradPad));
+  const metalGrad = ctx.createLinearGradient(gradA.x, gradA.y, gradB.x, gradB.y);
+  metalGrad.addColorStop(0, colors.skinShade);
+  metalGrad.addColorStop(0.32, colors.skin);
+  metalGrad.addColorStop(0.5, colors.skinHighlight);
+  metalGrad.addColorStop(0.68, colors.skin);
+  metalGrad.addColorStop(1, colors.skinShade);
 
-  // The skin itself is always drawn fully opaque (that's the whole point of
-  // the union-outline trick above — no seams). `xray` only controls whether
-  // the thin bone struts are drawn translucently on TOP of it, afterward.
   ctx.save();
   ctx.lineJoin = 'round';
 
   // -- Pass 1: stroke every outline FIRST, at double the visible width. ----
-  // The fill pass (below) covers the inner half of each stroke; only the
-  // half not covered by any piece's fill survives, which is exactly the
-  // outline of the boolean union, no seams where pieces overlap.
-  const outlineW = Math.max(1, armScale * 0.018);
+  const outlineW = Math.max(1, armScale * 0.02);
   ctx.strokeStyle = colors.outline;
   ctx.lineWidth = outlineW * 2;
   for (const p of pieces) ctx.stroke(p);
 
-  // -- Pass 2: fill every piece (and seam-blend cap) solid, opaque, on top. -
-  ctx.fillStyle = colors.skin;
+  // -- Pass 2: fill every piece (and seam-blend/rivet cap) with the shared
+  // metallic gradient, opaque, on top. ---------------------------------
+  ctx.fillStyle = metalGrad;
   for (const cp of capPieces) ctx.fill(cp);
   for (const p of pieces) ctx.fill(p, 'nonzero');
 
   // -- Decorative overlays, drawn on top of the finished opaque union. -----
 
-  // Subtle one-sided shading along the "far" side of the limb + palm.
+  // Specular highlight stripe along the "near" side of the limb + palm —
+  // reads as a bright reflection running down a metal tube.
+  ctx.beginPath();
+  ctx.moveTo(limbTube.leftPts[0].x, limbTube.leftPts[0].y);
+  curveThrough(ctx, limbTube.leftPts.slice(1));
+  if (palmTube) curveThrough(ctx, palmTube.leftPts);
+  ctx.strokeStyle = colors.skinHighlight;
+  ctx.globalAlpha = 0.4;
+  ctx.lineWidth = Math.max(1, armScale * 0.02);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // Subtle shading along the far side.
   ctx.beginPath();
   ctx.moveTo(limbTube.rightPts[0].x, limbTube.rightPts[0].y);
   curveThrough(ctx, limbTube.rightPts.slice(1));
   if (palmTube) curveThrough(ctx, palmTube.rightPts);
   ctx.strokeStyle = colors.skinShade;
-  ctx.globalAlpha = 0.35;
-  ctx.lineWidth = Math.max(1, armScale * 0.03);
+  ctx.globalAlpha = 0.4;
+  ctx.lineWidth = Math.max(1, armScale * 0.025);
   ctx.stroke();
   ctx.globalAlpha = 1;
 
-  // Small crease line at the elbow and (if present) the wrist.
-  const creaseJoints = [];
-  if (limbCount === 2) creaseJoints.push(1);
-  if (hasHand) creaseJoints.push(2);
-  for (const j of creaseJoints) {
-    const p = jointsPx[j];
-    const dPrev = dirs[j - 1];
-    const dNext = dirs[j];
-    const nrm = j === 1 ? limbTube.jointNormal[1] : palmTube.jointNormal[0];
-    const r = j === 1 ? limbTube.jointWidth[1] : palmTube.jointWidth[0];
-    const cosAngle = clamp(dot(dPrev, dNext), -1, 1);
-    const fold = clamp((1 - cosAngle) / 2, 0, 1);
-    const cross = dPrev.x * dNext.y - dPrev.y * dNext.x;
-    const side = cross >= 0 ? -1 : 1;
-    const creaseCenter = add(p, scale(nrm, r * 0.55 * side));
-    const creaseAngle = Math.atan2(nrm.y, nrm.x);
+  // Panel-seam rings (rivets/hinges) at the elbow and wrist.
+  const seamJoints = [];
+  if (limbCount === 2) seamJoints.push({ p: mainJointsPx[1], r: limbTube.jointWidth[1] });
+  if (hasPalm) seamJoints.push({ p: mainJointsPx[2], r: palmTube.jointWidth[0] });
+  for (const { p, r } of seamJoints) {
     ctx.beginPath();
-    ctx.arc(creaseCenter.x, creaseCenter.y, r * (0.35 + fold * 0.15), creaseAngle - 0.9, creaseAngle + 0.9);
-    ctx.strokeStyle = colors.skinShade;
+    ctx.arc(p.x, p.y, Math.max(2, r * 0.62), 0, Math.PI * 2);
+    ctx.strokeStyle = colors.outline;
+    ctx.globalAlpha = 0.55;
     ctx.lineWidth = Math.max(1, armScale * 0.012);
-    ctx.globalAlpha = 0.5;
     ctx.stroke();
     ctx.globalAlpha = 1;
-  }
-
-  // Fingernail on the real fingertip.
-  if (fingerTips.length && realFingerLastIdx >= 0) {
-    const tip = fingerTips[0];
-    const tipWidth = Math.max(MIN_HALF * 0.85, armScale * profileAt(FINGER_PROFILES.phalanx2, 1));
-    const tipNormal = normalOf(tip.dir);
-    const nailBase = jointsPx[realFingerLastIdx];
-    const nailCenter = add(lerp(nailBase, tip.point, 0.72), scale(tipNormal, tipWidth * 0.3));
-    const nailR = Math.max(1.5, tipWidth * 0.42);
     ctx.beginPath();
-    ctx.ellipse(nailCenter.x, nailCenter.y, nailR * 0.85, nailR * 0.55, Math.atan2(tip.dir.y, tip.dir.x), 0, Math.PI * 2);
-    ctx.strokeStyle = colors.outline;
-    ctx.lineWidth = Math.max(0.75, armScale * 0.008);
-    ctx.globalAlpha = 0.7;
-    ctx.stroke();
+    ctx.arc(p.x, p.y, Math.max(1.2, r * 0.22), 0, Math.PI * 2);
+    ctx.fillStyle = colors.skinHighlight;
+    ctx.globalAlpha = 0.6;
+    ctx.fill();
     ctx.globalAlpha = 1;
   }
 
   ctx.restore();
 
-  // X-ray: show the underlying bone struts, thin and translucent, on top of
-  // the now fully-opaque skin.
+  // X-ray: show the underlying main-chain bone struts, thin and
+  // translucent, on top of the now fully-opaque skin.
   if (xray) {
     ctx.save();
     ctx.globalAlpha = 0.55;
@@ -529,23 +464,23 @@ export function drawArmSkin(ctx, jointsPx, opts = {}) {
     ctx.lineCap = 'round';
     ctx.beginPath();
     for (let i = 0; i < n; i++) {
-      ctx.moveTo(jointsPx[i].x, jointsPx[i].y);
-      ctx.lineTo(jointsPx[i + 1].x, jointsPx[i + 1].y);
+      ctx.moveTo(mainJointsPx[i].x, mainJointsPx[i].y);
+      ctx.lineTo(mainJointsPx[i + 1].x, mainJointsPx[i + 1].y);
     }
     ctx.stroke();
     for (let j = 0; j <= n; j++) {
       ctx.beginPath();
-      ctx.arc(jointsPx[j].x, jointsPx[j].y, Math.max(2, armScale * 0.017), 0, Math.PI * 2);
+      ctx.arc(mainJointsPx[j].x, mainJointsPx[j].y, Math.max(2, armScale * 0.017), 0, Math.PI * 2);
       ctx.fillStyle = colors.bone;
       ctx.fill();
     }
     ctx.restore();
   }
 
-  // Selection highlight.
+  // Selection highlight (main-chain bone).
   if (Number.isInteger(opts.selectedIndex) && opts.selectedIndex >= 0 && opts.selectedIndex < n) {
-    const p0 = jointsPx[opts.selectedIndex];
-    const p1 = jointsPx[opts.selectedIndex + 1];
+    const p0 = mainJointsPx[opts.selectedIndex];
+    const p1 = mainJointsPx[opts.selectedIndex + 1];
     ctx.save();
     ctx.strokeStyle = '#ffcc33';
     ctx.globalAlpha = 0.85;

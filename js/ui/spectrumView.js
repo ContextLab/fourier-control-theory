@@ -4,6 +4,11 @@
 import { setupCanvas, cssVar } from './canvas.js';
 import { add, abs, arg, fromPolar } from '../core/complex.js';
 import { MAX_FREQ, MAX_AMP } from '../core/store.js';
+import { MAIN_JOINT_IDS } from '../core/gesture.js';
+
+const RAD2DEG = 180 / Math.PI;
+const DEG2RAD = Math.PI / 180;
+const GESTURE_MAX_H = 4; // H <= 4 per core/gesture.js's joint-angle series model
 
 const HEAD_HIT = 10; // px
 const STEM_HIT = 6; // px, horizontal tolerance
@@ -91,6 +96,118 @@ export function createSpectrumView(canvas, store, opts = {}) {
   let dragging = null; // { id, mode: 'move'|'phase-ring', startX, startY, startPhase, startFreqInt }
   let hoverId = null;
 
+  // -- Gesture mode: joint-angle spectrum for the currently-selected joint --
+  // (mean q̄ at h=0, then each harmonic's amplitude/phase) — showing every one
+  // of the 18 joints at once would be unreadable, so this focuses on one
+  // joint at a time; select a different joint on the arm or in the editor to
+  // inspect its spectrum here.
+  let lastGestureStems = []; // [{h, isMean, px, py, baseY}]
+  let lastGestureLayout = null;
+  let lastGestureBoneId = null;
+
+  function selectedGestureBone(state, bones) {
+    return bones.find((b) => b.id === state.selectedId) || bones.find((b) => b.id === MAIN_JOINT_IDS[0]);
+  }
+
+  function renderGestureSpectrum(state, bones) {
+    const { ctx, w, h } = cv;
+    ctx.save();
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = colors.bg;
+    ctx.fillRect(0, 0, w, h);
+
+    const bone = selectedGestureBone(state, bones);
+    lastGestureBoneId = bone.id;
+    const entries = [{ h: 0, val: bone.series.mean * RAD2DEG, isMean: true, phase: 0 }];
+    for (const hm of bone.series.harmonics) entries.push({ h: hm.h, val: hm.amp * RAD2DEG, isMean: false, phase: hm.phase });
+
+    const plotX = MARGIN.left;
+    const plotY = MARGIN.top;
+    const plotW = Math.max(1, cv.w - MARGIN.left - MARGIN.right);
+    const plotH = Math.max(1, cv.h - MARGIN.top - MARGIN.bottom);
+    const maxAbs = Math.max(20, ...entries.map((e) => Math.abs(e.val))) * 1.25;
+    const F = GESTURE_MAX_H;
+    const xToPx = (hIdx) => plotX + ((hIdx + 0.5) / (F + 1)) * plotW;
+    const midY = plotY + plotH / 2;
+    const valToPx = (v) => midY - (v / maxAbs) * (plotH / 2);
+    lastGestureLayout = {
+      plotX, plotY, plotW, plotH, midY, maxAbs, xToPx, valToPx,
+    };
+
+    ctx.strokeStyle = colors.border;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(plotX, midY);
+    ctx.lineTo(plotX + plotW, midY);
+    ctx.stroke();
+    ctx.font = '10px sans-serif';
+    ctx.fillStyle = colors.textSecondary;
+    ctx.textAlign = 'center';
+    for (let hIdx = 0; hIdx <= F; hIdx++) {
+      const px = xToPx(hIdx);
+      ctx.fillText(hIdx === 0 ? 'mean' : `h=${hIdx}`, px, plotY + plotH + 14);
+    }
+    ctx.textAlign = 'left';
+    ctx.fillText(`${bone.label} — deg`, plotX, plotY - 4);
+
+    lastGestureStems = [];
+    for (const e of entries) {
+      const px = xToPx(e.h);
+      const py = valToPx(e.val);
+      const selected = true; // only one joint shown at a time
+      const hovered = hoverId === `g-${e.h}`;
+      ctx.beginPath();
+      ctx.strokeStyle = bone.color || colors.primary;
+      ctx.lineWidth = 2;
+      ctx.moveTo(px, midY);
+      ctx.lineTo(px, py);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.fillStyle = bone.color || colors.primary;
+      ctx.strokeStyle = colors.bg;
+      ctx.lineWidth = 1.5;
+      ctx.arc(px, py, hovered ? 7 : 5.5, 0, TWO_PI);
+      ctx.fill();
+      ctx.stroke();
+      if (!e.isMean) {
+        const tickLen = 9;
+        ctx.beginPath();
+        ctx.strokeStyle = colors.textSecondary;
+        ctx.lineWidth = 1.5;
+        ctx.moveTo(px, py);
+        ctx.lineTo(px + Math.cos(e.phase) * tickLen, py - Math.sin(e.phase) * tickLen);
+        ctx.stroke();
+      }
+      lastGestureStems.push({
+        h: e.h, isMean: e.isMean, px, py, baseY: midY,
+      });
+      void selected;
+    }
+
+    if (!hasInteracted && plotW >= 260) {
+      ctx.font = themeFont(11);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = colors.textSecondary;
+      ctx.globalAlpha = 0.6;
+      ctx.fillText('drag ↕ amplitude (or mean) · alt-drag ↕ phase', plotX + plotW / 2, plotY + plotH + 30);
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+  }
+
+  function hitGestureStem(x, y) {
+    let best = null;
+    let bestDist = HEAD_HIT;
+    for (const s of lastGestureStems) {
+      const d = Math.hypot(s.px - x, s.py - y);
+      if (d <= bestDist) {
+        bestDist = d;
+        best = s;
+      }
+    }
+    return best;
+  }
+
   function valueOf(comp, yScale) {
     return yScale === 'power' ? comp.amp * comp.amp : Math.abs(comp.amp);
   }
@@ -157,6 +274,10 @@ export function createSpectrumView(canvas, store, opts = {}) {
   }
 
   function render(state, derived) {
+    if (state.motion === 'gesture' && state.gesture && state.gesture.bones) {
+      renderGestureSpectrum(state, state.gesture.bones);
+      return;
+    }
     const { ctx, w, h } = cv;
     const components = state.components || [];
     const L = computeLayout(state, components);
@@ -330,8 +451,13 @@ export function createSpectrumView(canvas, store, opts = {}) {
     }
 
     // Affordance hint: shown only while nothing is selected and before the
-    // user's first interaction with this view.
-    if (!state.selectedId && !hasInteracted) {
+    // user's first interaction with this view, and only once the plot is
+    // wide enough for both lines to fit without wrapping/overlapping the
+    // stems (fixed strings, not measured/wrapped) — on a narrow mobile
+    // viewport (~390px) it's simply omitted rather than clipped or drawn on
+    // top of the stems.
+    const HINT_MIN_WIDTH = 360;
+    if (!state.selectedId && !hasInteracted && L.plotW >= HINT_MIN_WIDTH) {
       ctx.font = themeFont(11);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -401,6 +527,16 @@ export function createSpectrumView(canvas, store, opts = {}) {
     canvas.focus();
     markInteracted();
 
+    if (state.motion === 'gesture' && state.gesture) {
+      const s = hitGestureStem(x, y);
+      if (!s) return;
+      dragging = { gesture: true, boneId: lastGestureBoneId, h: s.h, isMean: s.isMean };
+      canvas.style.cursor = 'grabbing';
+      canvas.setPointerCapture(evt.pointerId);
+      evt.preventDefault();
+      return;
+    }
+
     const ring = hitRingHandle(x, y, state);
     if (ring) {
       dragging = { id: ring.id, mode: 'phase-ring' };
@@ -441,6 +577,7 @@ export function createSpectrumView(canvas, store, opts = {}) {
     const { x, y } = localXY(evt);
     const state = store.get();
     markInteracted();
+    if (state.motion === 'gesture') return; // "add a component" is a spin-mode-only action
     // Ignore dblclick on an existing stem/head (that's a selection double-click,
     // not "add"); only add when the second click lands on empty plot area.
     if (hitHead(x, y) || hitStem(x, y)) return;
@@ -453,8 +590,42 @@ export function createSpectrumView(canvas, store, opts = {}) {
 
   function onPointerMove(evt) {
     const { x, y } = localXY(evt);
+
+    if (dragging && dragging.gesture) {
+      const state = store.get();
+      const bones = state.gesture && state.gesture.bones;
+      const L = lastGestureLayout;
+      if (!bones || !L) return;
+      const value = L.maxAbs * ((L.midY - y) / (L.plotH / 2)); // degrees
+      if (dragging.isMean) {
+        const clamped = Math.max(-180, Math.min(180, value));
+        store.updateJointMean(dragging.boneId, clamped * DEG2RAD, 'spectrum');
+      } else if (evt.altKey) {
+        const bone = bones.find((b) => b.id === dragging.boneId);
+        const harmonic = bone && bone.series.harmonics.find((hm) => hm.h === dragging.h);
+        if (dragging.phaseStartY === undefined) {
+          dragging.phaseStartY = y;
+          dragging.phaseStart = harmonic ? harmonic.phase : 0;
+        }
+        const dphase = ((dragging.phaseStartY - y) / 100) * TWO_PI;
+        store.updateJointHarmonic(dragging.boneId, dragging.h, { phase: wrapAngle(dragging.phaseStart + dphase) }, 'spectrum');
+      } else {
+        dragging.phaseStartY = undefined;
+        const amp = Math.max(0, value);
+        store.updateJointHarmonic(dragging.boneId, dragging.h, { amp: amp * DEG2RAD }, 'spectrum');
+      }
+      evt.preventDefault();
+      return;
+    }
+
     if (!dragging) {
       const state = store.get();
+      if (state.motion === 'gesture' && state.gesture) {
+        const hit = hitGestureStem(x, y);
+        hoverId = hit ? `g-${hit.h}` : null;
+        canvas.style.cursor = hit ? 'grab' : 'crosshair';
+        return;
+      }
       const ring = hitRingHandle(x, y, state);
       const hit = ring || hitHead(x, y) || hitStem(x, y);
       hoverId = hit ? hit.id : null;
@@ -519,6 +690,14 @@ export function createSpectrumView(canvas, store, opts = {}) {
 
   function onPointerUp(evt) {
     if (!dragging) return;
+    if (dragging.gesture) {
+      try { canvas.releasePointerCapture(evt.pointerId); } catch { /* noop */ }
+      dragging = null;
+      const { x, y } = localXY(evt);
+      const hit = hitGestureStem(x, y);
+      canvas.style.cursor = hit ? 'grab' : 'crosshair';
+      return;
+    }
     if (dragging.mode === 'move' && evt.shiftKey) {
       const state = store.get();
       const comp = state.components.find((c) => c.id === dragging.id);
@@ -562,6 +741,7 @@ export function createSpectrumView(canvas, store, opts = {}) {
   function onWheel(evt) {
     const state = store.get();
     if (document.activeElement !== canvas) return; // let the page scroll
+    if (state.motion === 'gesture') return; // gesture-mode phase editing is alt-drag only
     if (!state.selectedId) return;
     const comp = state.components.find((c) => c.id === state.selectedId);
     if (!comp) return;
@@ -584,6 +764,10 @@ export function createSpectrumView(canvas, store, opts = {}) {
     if (!touch) return;
     const { x, y } = localXY(touch);
     const state = store.get();
+    if (state.motion === 'gesture') {
+      if (hitGestureStem(x, y)) evt.preventDefault();
+      return;
+    }
     const hit = hitRingHandle(x, y, state) || hitHead(x, y) || hitStem(x, y);
     if (hit) evt.preventDefault();
   }
@@ -591,6 +775,7 @@ export function createSpectrumView(canvas, store, opts = {}) {
   function onKeyDown(evt) {
     if (evt.key !== 'Delete' && evt.key !== 'Backspace') return;
     const state = store.get();
+    if (state.motion === 'gesture') return; // no delete-a-joint action in gesture mode
     if (!state.selectedId) return;
     evt.preventDefault();
     markInteracted();

@@ -7,6 +7,7 @@
 // (see MAX_FREQ/MAX_AMP below) become visible again as soon as the field blurs.
 
 import { MAX_FREQ, MAX_AMP } from '../core/store.js';
+import { MAIN_JOINT_IDS, FINGER_NAMES } from '../core/gesture.js';
 
 const RAD2DEG = 180 / Math.PI;
 const DEG2RAD = Math.PI / 180;
@@ -131,11 +132,17 @@ function buildRow(component, store) {
     store.set({ selectedId: component.id }, 'editor');
   });
 
+  // Pass the raw typed value straight through to the store and let
+  // sanitizeComponent() do the actual rounding/clamping — it rounds
+  // sign-symmetrically (-2.5 -> -3, matching 2.5 -> 3) and folds a negative
+  // amplitude to its absolute value with the phase shifted by pi, rather
+  // than this module re-implementing (and subtly disagreeing with) that
+  // logic locally.
   bindPair(freqInput, freqSlider, (value) => {
-    store.updateComponent(component.id, { freq: Math.round(value) }, 'editor');
+    store.updateComponent(component.id, { freq: value }, 'editor');
   });
   bindPair(ampInput, ampSlider, (value) => {
-    store.updateComponent(component.id, { amp: Math.max(0, Math.min(MAX_AMP, value)) }, 'editor');
+    store.updateComponent(component.id, { amp: value }, 'editor');
   });
   bindPair(phaseInput, phaseSlider, (value) => {
     store.updateComponent(component.id, { phase: value * DEG2RAD }, 'editor');
@@ -187,6 +194,106 @@ function patchRow(row, component) {
   row.swatch.style.background = component.color || '#888';
 }
 
+// -- Gesture mode: per-joint rows (mean angle + compact harmonic fields),
+// grouped into a collapsible <details> section per finger so the 15 finger
+// joints don't overwhelm the 3 main-chain rows. --------------------------
+
+function buildJointRow(bone, store) {
+  const row = document.createElement('div');
+  row.className = 'editor-row gesture-joint-row';
+  row.dataset.id = bone.id;
+
+  const swatch = document.createElement('span');
+  swatch.className = 'editor-swatch';
+  swatch.style.background = bone.color || '#888';
+  row.appendChild(swatch);
+
+  const label = document.createElement('div');
+  label.className = 'editor-label';
+  label.textContent = bone.label;
+  row.appendChild(label);
+
+  const meanField = document.createElement('div');
+  meanField.className = 'editor-field';
+  const meanInput = document.createElement('input');
+  meanInput.type = 'number';
+  meanInput.step = '1';
+  meanInput.title = 'Mean joint angle q̄ (deg) — dragging the joint on the arm sets this; the oscillation continues around it';
+  meanInput.value = fmtDeg(bone.series.mean);
+  const meanSlider = document.createElement('input');
+  meanSlider.type = 'range';
+  meanSlider.min = '-180';
+  meanSlider.max = '180';
+  meanSlider.step = '1';
+  meanSlider.title = meanInput.title;
+  meanSlider.value = fmtDeg(bone.series.mean);
+  meanField.append(meanInput, meanSlider);
+  row.appendChild(meanField);
+  bindPair(meanInput, meanSlider, (value) => {
+    store.updateJointMean(bone.id, value * DEG2RAD, 'editor');
+  });
+
+  const harmWrap = document.createElement('div');
+  harmWrap.className = 'editor-harmonics';
+  const harmonics = [];
+  for (const h of bone.series.harmonics || []) {
+    const hLabel = document.createElement('span');
+    hLabel.className = 'harm-label';
+    hLabel.textContent = `h${h.h}`;
+    const ampInput = document.createElement('input');
+    ampInput.type = 'number';
+    ampInput.step = '1';
+    ampInput.className = 'harm-amp';
+    ampInput.title = `Harmonic h=${h.h} amplitude (deg)`;
+    ampInput.value = fmtDeg(h.amp);
+    const phaseInput = document.createElement('input');
+    phaseInput.type = 'number';
+    phaseInput.step = '1';
+    phaseInput.className = 'harm-phase';
+    phaseInput.title = `Harmonic h=${h.h} phase (deg)`;
+    phaseInput.value = fmtDeg(h.phase);
+    ampInput.addEventListener('input', () => {
+      const v = parseFloat(ampInput.value);
+      if (Number.isFinite(v)) store.updateJointHarmonic(bone.id, h.h, { amp: Math.max(0, v) * DEG2RAD }, 'editor');
+    });
+    phaseInput.addEventListener('input', () => {
+      const v = parseFloat(phaseInput.value);
+      if (Number.isFinite(v)) store.updateJointHarmonic(bone.id, h.h, { phase: v * DEG2RAD }, 'editor');
+    });
+    harmWrap.append(hLabel, ampInput, phaseInput);
+    harmonics.push({ h: h.h, ampInput, phaseInput });
+  }
+  row.appendChild(harmWrap);
+
+  row.addEventListener('click', (e) => {
+    if (e.target.closest('input, button')) return;
+    store.set({ selectedId: bone.id }, 'editor');
+  });
+
+  return {
+    el: row, meanInput, meanSlider, harmonics,
+  };
+}
+
+function patchJointRow(row, bone) {
+  if (document.activeElement !== row.meanInput && document.activeElement !== row.meanSlider) {
+    row.meanInput.value = fmtDeg(bone.series.mean);
+    row.meanSlider.value = fmtDeg(bone.series.mean);
+  }
+  const harmonics = bone.series.harmonics || [];
+  row.harmonics.forEach((h, i) => {
+    const src = harmonics[i];
+    if (!src) return;
+    if (document.activeElement !== h.ampInput) h.ampInput.value = fmtDeg(src.amp);
+    if (document.activeElement !== h.phaseInput) h.phaseInput.value = fmtDeg(src.phase);
+  });
+}
+
+/** Signature used to decide "patch in place" vs "rebuild" for a gesture bone list. */
+function gestureSignature(bones) {
+  return bones.map((b) => `${b.id}:${(b.series.harmonics || []).length}`).join('|');
+}
+
 /**
  * @param {HTMLElement} container - #editor list container
  * @param {ReturnType<typeof import('../core/store.js').createStore>} store
@@ -195,6 +302,37 @@ function patchRow(row, component) {
 export function createEditor(container, store) {
   const rows = new Map();
   let idOrder = [];
+  let gestureSig = null;
+
+  function fullRebuildGesture(state) {
+    container.innerHTML = '';
+    rows.clear();
+    const bones = state.gesture.bones;
+    const byId = new Map(bones.map((b) => [b.id, b]));
+    idOrder = bones.map((b) => b.id);
+    gestureSig = gestureSignature(bones);
+
+    for (const id of MAIN_JOINT_IDS) {
+      const row = buildJointRow(byId.get(id), store);
+      rows.set(id, row);
+      container.appendChild(row.el);
+    }
+    for (const name of FINGER_NAMES) {
+      const details = document.createElement('details');
+      details.className = 'editor-finger-section';
+      const summary = document.createElement('summary');
+      summary.textContent = `${name[0].toUpperCase()}${name.slice(1)}`;
+      details.appendChild(summary);
+      for (let j = 1; j <= 3; j++) {
+        const id = `${name}${j}`;
+        const row = buildJointRow(byId.get(id), store);
+        rows.set(id, row);
+        details.appendChild(row.el);
+      }
+      container.appendChild(details);
+    }
+    updateSelection(state.selectedId);
+  }
 
   function renderEmptyHint() {
     const hint = document.createElement('div');
@@ -239,7 +377,20 @@ export function createEditor(container, store) {
     if (changedKeys.has('selectedId')) {
       updateSelection(state.selectedId);
     }
-    if (changedKeys.has('components')) {
+    if (state.motion === 'gesture') {
+      if (changedKeys.has('gesture') || changedKeys.has('motion')) {
+        if (!state.gesture) return;
+        const sig = gestureSignature(state.gesture.bones);
+        if (sig !== gestureSig || changedKeys.has('motion')) {
+          fullRebuildGesture(state);
+        } else {
+          const byId = new Map(state.gesture.bones.map((b) => [b.id, b]));
+          for (const [id, row] of rows) patchJointRow(row, byId.get(id));
+        }
+      }
+      return;
+    }
+    if (changedKeys.has('components') || changedKeys.has('motion')) {
       if (!sameShape(state.components)) {
         fullRebuild(state);
       } else {
@@ -265,8 +416,12 @@ export function createEditor(container, store) {
     });
   }
 
-  fullRebuild(store.get());
-  const unsubscribe = store.subscribe(onStoreChange, ['components', 'selectedId']);
+  if (store.get().motion === 'gesture' && store.get().gesture) {
+    fullRebuildGesture(store.get());
+  } else {
+    fullRebuild(store.get());
+  }
+  const unsubscribe = store.subscribe(onStoreChange, ['components', 'selectedId', 'gesture', 'motion']);
 
   return {
     destroy() {

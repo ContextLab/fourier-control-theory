@@ -299,3 +299,45 @@ test('addComponent, updateComponent, setComponents, and set({components}) all sa
   assert.equal(store.get().components[0].freq, MAX_FREQ);
   assert.equal(store.get().components[0].amp, MAX_AMP);
 });
+
+// --- gesture mode --------------------------------------------------------
+
+test('createStore defaults to gesture motion with no gesture loaded yet', () => {
+  const store = createStore();
+  assert.equal(store.get().motion, 'gesture');
+  assert.equal(store.get().gesture, null);
+});
+
+test('setGesture loads a bone tree and notifies ["gesture"] subscribers', () => {
+  const store = createStore();
+  const seen = [];
+  store.subscribe((state, keys) => seen.push([...keys]), ['gesture']);
+  const bones = [{ id: 'a', parent: null, length: 1, series: { mean: 0, harmonics: [] } }];
+  store.setGesture(bones, 'presets');
+  assert.equal(store.get().gesture.bones, bones);
+  assert.deepEqual(seen, [['gesture']]);
+});
+
+test('updateJointMean patches only the targeted bone\'s series.mean, leaving others untouched', () => {
+  const store = createStore();
+  store.setGesture([
+    { id: 'a', parent: null, length: 1, series: { mean: 0.1, harmonics: [{ h: 1, amp: 0.2, phase: 0 }] } },
+    { id: 'b', parent: 'a', length: 1, series: { mean: 0.3, harmonics: [] } },
+  ]);
+  store.updateJointMean('a', 1.23, 'arm');
+  const bones = store.get().gesture.bones;
+  assert.equal(bones[0].series.mean, 1.23);
+  assert.deepEqual(bones[0].series.harmonics, [{ h: 1, amp: 0.2, phase: 0 }]); // oscillation preserved
+  assert.equal(bones[1].series.mean, 0.3); // untouched
+});
+
+test('updateJointHarmonic patches one harmonic of one joint by (id, h)', () => {
+  const store = createStore();
+  store.setGesture([
+    { id: 'a', parent: null, length: 1, series: { mean: 0, harmonics: [{ h: 1, amp: 0.2, phase: 0 }, { h: 2, amp: 0.1, phase: 1 }] } },
+  ]);
+  store.updateJointHarmonic('a', 2, { amp: 0.5 }, 'spectrum');
+  const harmonics = store.get().gesture.bones[0].series.harmonics;
+  assert.deepEqual(harmonics[0], { h: 1, amp: 0.2, phase: 0 }); // untouched
+  assert.deepEqual(harmonics[1], { h: 2, amp: 0.5, phase: 1 }); // amp patched, phase kept
+});

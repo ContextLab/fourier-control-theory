@@ -82,10 +82,14 @@
   /* Z-index */
   --z-fixed: 1030;
 
-  /* Anatomical arm skin (same in light theme) */
-  --skin: #e8b894;
-  --skin-shade: #c98f6b;
-  --skin-outline: #7a4a32;
+  /* Robot-arm metallic shell (brushed steel; darker in dark mode for
+     contrast against the dark canvas background, lighter in light mode). */
+  --skin: #6b7480;
+  --skin-shade: #3d434b;
+  --skin-highlight: #dfe4e9;
+  --skin-outline: #1c2024;
+  --table-color: #8a6a48;
+  --ball-color: #d94415;
 
   /* Accessible variant of --primary-color for text/borders on dark surfaces
      (the raw brand green fails WCAG AA at small text sizes on dark backgrounds). */
@@ -93,6 +97,12 @@
 
   /* Passband/filter shading on the control-tab plots, themed instead of a hardcoded rgba(). */
   --passband-fill: rgba(43, 179, 122, 0.18);
+
+  /* Hero title gradient: lightened relative to --gradient-primary so the
+     text-clipped title stays readable against the dark hero background
+     (the raw brand green reads fine as a button fill, but low-contrast as
+     text on dark). The light theme below restores the course's own colors. */
+  --hero-gradient: linear-gradient(135deg, #1a8a5a 0%, #2bb37a 100%);
 }
 
 /* Light theme overrides */
@@ -112,6 +122,13 @@
   --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
   --primary-accessible: #00693e;
   --passband-fill: rgba(0, 105, 62, 0.13);
+  --hero-gradient: var(--gradient-primary);
+
+  /* Metallic shell, lightened for contrast against a white canvas background. */
+  --skin: #9aa3ad;
+  --skin-shade: #6b7480;
+  --skin-highlight: #f4f6f8;
+  --skin-outline: #2b3138;
 }
 
 /* ============ Base ============ */
@@ -218,7 +235,7 @@ body:has(.demo-nav) { padding-top: 70px; }
   font-weight: 800;
   line-height: 1.2;
   margin-bottom: 0.4rem;
-  background: var(--gradient-primary);
+  background: var(--hero-gradient);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -349,6 +366,19 @@ input:disabled { opacity: 0.45; cursor: not-allowed; }
   background: var(--surface-color);
   color: var(--text-primary);
 }
+
+/* A <select> with a long option label (e.g. the Preset dropdown's "Human arm
+   — Fourier spin (links = components)") otherwise sizes to fit that text and
+   overflows a narrow mobile viewport; let it shrink and ellipsize instead. */
+.control-group select {
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.control-group:has(select) { min-width: 0; }
 
 .control-group select:focus,
 .control-group input:focus {

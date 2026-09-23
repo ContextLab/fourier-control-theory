@@ -1,9 +1,13 @@
-// Robot-arm / epicycle view: chain of links (Fourier components), joint dragging,
-// end-effector trace + fading trail.
+// Robot-arm / epicycle view: chain of links (Fourier components) in spin mode,
+// or the articulated arm+hand tree in gesture mode; joint dragging,
+// end-effector trace + fading trail; the pick-up-a-ball table + ball.
 import { setupCanvas, makeTransform, cssVar } from './canvas.js';
-import { jointPositions, invertDrag } from '../core/arm.js';
+import { jointPositions, invertDrag, jointAngles } from '../core/arm.js';
 import { drawArmSkin, isAnatomical } from './armSkin.js';
 import { MAX_AMP } from '../core/store.js';
+import {
+  forwardKinematics, evalSeries, FINGER_NAMES, FINGER_GEOMETRY, MAIN_JOINT_IDS, pickupBallState, PICKUP,
+} from '../core/gesture.js';
 
 const HIT_RADIUS = 12; // px, joint-tip hit test
 const TRAIL_MAX = 90; // recent-tip trail length (frames)
@@ -13,20 +17,64 @@ const TIME_JUMP_THRESHOLD = 0.05; // fraction of a period; a bigger circular jum
 const THEME_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
 
 /**
+ * Spin mode's hand overlay: the 5 components stay exactly upper arm, forearm,
+ * palm, "Finger", "Fingertip" (unchanged Fourier chain, still fully
+ * draggable as thin bone struts) — the INDEX finger reuses components 3 and
+ * 4's own live relative angles for its two segments, and the other four
+ * fingers "follow the index finger's curl" by applying that SAME pair of
+ * relative angles at their own anatomical base point, so all five render as
+ * separate, independently-outlined 2-segment fingers rooted on the palm.
+ * @param {Array<object>} components
+ * @param {number} t
+ * @param {{re:number,im:number}[]} pts - jointPositions(components, t) (length 6)
+ * @returns {Object<string, {re:number,im:number}[]>} per finger, [base, j1, j2]
+ */
+function spinHandFingerPoints(components, t, pts) {
+  if (components.length < 5) return {};
+  const { abs } = jointAngles(components, t);
+  const relFinger = abs[3] - abs[2];
+  const relTip = abs[4] - abs[3];
+  const handAbsAngle = abs[2];
+  const palmTip = pts[3];
+  const d = { re: Math.cos(handAbsAngle), im: Math.sin(handAbsAngle) };
+  const p = { re: -Math.sin(handAbsAngle), im: Math.cos(handAbsAngle) };
+  const out = {};
+  for (const f of FINGER_GEOMETRY) {
+    const base = {
+      re: palmTip.re + f.forward * d.re + f.lateral * p.re,
+      im: palmTip.im + f.forward * d.im + f.lateral * p.im,
+    };
+    const a1 = handAbsAngle + f.spread + relFinger;
+    const j1 = { re: base.re + f.lengths[0] * Math.cos(a1), im: base.im + f.lengths[0] * Math.sin(a1) };
+    const a2 = a1 + relTip;
+    const seg2Len = f.lengths[1] + f.lengths[2];
+    const j2 = { re: j1.re + seg2Len * Math.cos(a2), im: j1.im + seg2Len * Math.sin(a2) };
+    out[f.name] = [base, j1, j2];
+  }
+  return out;
+}
+
+/**
  * @param {HTMLCanvasElement} canvas
  * @param {ReturnType<import('../core/store.js').createStore>} store
  * @param {{interactive?: boolean, showTrace?: boolean, showCircles?: boolean,
  *          numberJoints?: boolean, componentsOverride?: () => Array<object>,
- *          skin?: boolean}} [opts] - `skin` (else `state.showSkin`) renders an
- *          anatomical arm (armSkin.js) with bones drawn thin/translucent on top.
+ *          gestureOverride?: () => Array<object>, skin?: boolean}} [opts] -
+ *          `componentsOverride` overrides spin-mode components (e.g. the
+ *          Control tab's band-limited reconstruction); `gestureOverride`
+ *          does the same for gesture mode's bone tree. `skin` (else
+ *          `state.showSkin`) renders the metallic-shell arm+hand
+ *          (armSkin.js) with bones drawn thin/translucent on top.
  */
 export function createArmView(canvas, store, opts = {}) {
   let lastJointsCss = [];
+  let lastGestureJointsCss = new Map(); // id -> {x, y}
   const {
     interactive = true,
     showTrace = true,
     numberJoints = false,
     componentsOverride = null,
+    gestureOverride = null,
   } = opts;
 
   const cv = setupCanvas(canvas);
@@ -49,9 +97,12 @@ export function createArmView(canvas, store, opts = {}) {
       border: cssVar('--border-color', '#334155'),
       primary: cssVar('--primary-color', '#00693e'),
       accent: cssVar('--accent-color', '#ffa00f'),
-      skin: cssVar('--skin', '#e8b894'),
-      skinShade: cssVar('--skin-shade', '#c98f6b'),
-      skinOutline: cssVar('--skin-outline', '#7a4a32'),
+      skin: cssVar('--skin', '#9aa3ad'),
+      skinShade: cssVar('--skin-shade', '#5b636c'),
+      skinHighlight: cssVar('--skin-highlight', '#e7ebef'),
+      skinOutline: cssVar('--skin-outline', '#2b3138'),
+      tableColor: cssVar('--table-color', '#7a5a3a'),
+      ballColor: cssVar('--ball-color', '#d94415'),
     };
   }
   const onThemeChange = () => { colors = readColors(); };
@@ -63,13 +114,24 @@ export function createArmView(canvas, store, opts = {}) {
   const trail = []; // { re, im } most-recent-last
   let lastT = null;
 
-  // Drag state
-  let dragging = null; // { pointerId, k, id }
-  let hoverK = -1;
+  // Drag state. In spin mode: { pointerId, k, id } (k = component index).
+  // In gesture mode: { pointerId, boneId, parentId }.
+  let dragging = null;
+  let hoverK = -1; // spin mode hover (component index)
+  let hoverBoneId = null; // gesture mode hover
   let lastPointerLocal = null; // { x, y } in canvas-center-relative local coords, for re-hit-testing on render
 
   function currentComponents(state) {
     return componentsOverride ? componentsOverride() : state.components;
+  }
+
+  function currentBones(state) {
+    if (gestureOverride) return gestureOverride();
+    return state.gesture && state.gesture.bones;
+  }
+
+  function isGestureMode(state) {
+    return state.motion === 'gesture' && !!currentBones(state);
   }
 
   function showCirclesFor(state) {
@@ -85,17 +147,44 @@ export function createArmView(canvas, store, opts = {}) {
     trail.length = 0;
   }
 
-  // Track the source of the most recent components change, so autofit can
-  // tell "the user is manipulating the arm" (source 'arm': a joint drag)
-  // apart from "the shape changed underneath them" (preset load, editor
-  // edit, drawing, a spectrum-stem drag). Also resets the fading trail
-  // whenever the change came from outside this view, so it never draws a
-  // straight chord from the old shape's tip to the new one's.
+  // Track the source of the most recent components/gesture change, so
+  // autofit can tell "the user is manipulating the arm" (source 'arm': a
+  // joint drag) apart from "the shape changed underneath them" (preset load,
+  // editor edit, drawing, a spectrum-stem drag). Also resets the fading
+  // trail whenever the change came from outside this view.
   let lastComponentsSource = null;
   const unsubscribeComponents = store.subscribe((state, changedKeys, source) => {
     lastComponentsSource = source;
     if (source !== 'arm') resetTrail();
-  }, ['components']);
+  }, ['components', 'gesture']);
+
+  // -- Gesture-mode FK helpers ---------------------------------------------
+
+  /** Main-chain world points [origin, upperArmTip, forearmTip, palmTip] + the FK map. */
+  function gestureMainPoints(bones, t) {
+    const fk = forwardKinematics(bones, t);
+    const pts = [{ re: 0, im: 0 }];
+    for (const id of MAIN_JOINT_IDS) pts.push(fk.get(id).tip);
+    return { pts, fk };
+  }
+
+  /** Per-finger world points {name: [base, j1, j2, j3]} from an FK map. */
+  function fingerWorldPoints(fk) {
+    const out = {};
+    for (const name of FINGER_NAMES) {
+      const b1 = fk.get(`${name}1`);
+      const b2 = fk.get(`${name}2`);
+      const b3 = fk.get(`${name}3`);
+      if (!b1 || !b2 || !b3) continue;
+      out[name] = [b1.base, b1.tip, b2.tip, b3.tip];
+    }
+    return out;
+  }
+
+  /** All 18 joints as a flat [{id, tip, parentId}] list, for hit-testing/drag. */
+  function allJointsFlat(bones, fk) {
+    return bones.map((b) => ({ id: b.id, tip: fk.get(b.id).tip, parentAbsAngle: fk.get(b.id).absAngle - fk.get(b.id).relAngle }));
+  }
 
   /**
    * Bounding box (world units) of the union of the full-period path and the
@@ -132,6 +221,38 @@ export function createArmView(canvas, store, opts = {}) {
     return { minRe, maxRe, minIm, maxIm, cx, cy, bboxW, bboxH };
   }
 
+  function computeBBoxGesture(bones, fk, kind) {
+    let minRe = Infinity;
+    let maxRe = -Infinity;
+    let minIm = Infinity;
+    let maxIm = -Infinity;
+    const extend = (re, im) => {
+      if (!Number.isFinite(re) || !Number.isFinite(im)) return;
+      if (re < minRe) minRe = re;
+      if (re > maxRe) maxRe = re;
+      if (im < minIm) minIm = im;
+      if (im > maxIm) maxIm = im;
+    };
+    extend(0, 0);
+    for (const b of bones) {
+      const j = fk.get(b.id);
+      extend(j.tip.re, j.tip.im);
+    }
+    if (kind === 'pickup') {
+      extend(PICKUP.ballRestX - 0.15, PICKUP.tableY - 0.05);
+      extend(PICKUP.ballRestX + 0.15, PICKUP.tableY + 0.05);
+    }
+    let bboxW = Number.isFinite(minRe) ? maxRe - minRe : 0;
+    let bboxH = Number.isFinite(minIm) ? maxIm - minIm : 0;
+    const cx = Number.isFinite(minRe) ? (minRe + maxRe) / 2 : 0;
+    const cy = Number.isFinite(minIm) ? (minIm + maxIm) / 2 : 0;
+    if (!(bboxW > 1e-6) && !(bboxH > 1e-6)) {
+      bboxW = 1;
+      bboxH = 1;
+    }
+    return { minRe, maxRe, minIm, maxIm, cx, cy, bboxW, bboxH };
+  }
+
   // Every built-in preset normalizes its components' amplitudes to sum to 1
   // (see core/presets.js), so a component list's total reach (sum of |amp|)
   // is a stable proxy for "how big the arm itself is" regardless of how much
@@ -141,11 +262,10 @@ export function createArmView(canvas, store, opts = {}) {
   const MIN_REACH_FRACTION = 0.32; // fraction of the canvas's smaller dimension
 
   /** Auto-fit target (scale + center) for a bbox, with an 8%-of-canvas margin. */
-  function fitTargetFromBBox(bbox, components) {
+  function fitTargetFromBBox(bbox, totalReach) {
     const availW = Math.max(1, cv.w * (1 - 2 * FIT_MARGIN));
     const availH = Math.max(1, cv.h * (1 - 2 * FIT_MARGIN));
     let scale = Math.min(availW / Math.max(bbox.bboxW, 1e-6), availH / Math.max(bbox.bboxH, 1e-6));
-    const totalReach = (components || []).reduce((s, c) => s + Math.abs(c.amp), 0);
     if (totalReach > 1e-6) {
       const minScale = (Math.min(cv.w, cv.h) * MIN_REACH_FRACTION) / totalReach;
       scale = Math.max(scale, minScale);
@@ -156,11 +276,7 @@ export function createArmView(canvas, store, opts = {}) {
   /**
    * `true` iff `bbox`, drawn with the CURRENT (not target) view, would spill
    * past the canvas edge (i.e. actually leave the visible canvas) — NOT
-   * merely past the cosmetic margin. A small, in-frame arm-drag nudges the
-   * full-period path's bbox slightly on every edit; re-fitting for that
-   * would make the view visibly drift right as the user releases the
-   * pointer, so only a real "gone off-screen" case should force a re-fit
-   * while the most recent change came from the arm itself.
+   * merely past the cosmetic margin.
    */
   function overflowsCanvas(bbox) {
     const tf = makeTransform(currentCenter, currentScale);
@@ -181,14 +297,263 @@ export function createArmView(canvas, store, opts = {}) {
 
   // Set right when a drag ends (onPointerUp), consumed on the very next
   // render: if that release left the arm/path actually overflowing the
-  // canvas (e.g. a shift-lengthen that grew a bone a lot), snap the autofit
-  // to its target immediately instead of the normal slow per-frame ease, so
-  // the arm doesn't visibly sit clipped at the edge for the ~15-20 frames
-  // SCALE_EASE would otherwise take to converge. Ordinary in-bounds pose
-  // changes never overflow, so this never fires for them.
+  // canvas, snap the autofit to its target immediately instead of easing.
   let justReleased = false;
 
+  function updateAutofit(bbox, totalReach) {
+    if (!viewInitialized) {
+      const target = fitTargetFromBBox(bbox, totalReach);
+      currentScale = target.scale;
+      currentCenter = target.center;
+      viewInitialized = true;
+      return;
+    }
+    if (dragging) return;
+    const overflowed = overflowsCanvas(bbox);
+    const shouldRefit = lastComponentsSource !== 'arm' || overflowed;
+    if (shouldRefit) {
+      const target = fitTargetFromBBox(bbox, totalReach);
+      const ease = (justReleased && overflowed) ? 1 : SCALE_EASE;
+      currentScale += (target.scale - currentScale) * ease;
+      currentCenter = {
+        re: currentCenter.re + (target.center.re - currentCenter.re) * ease,
+        im: currentCenter.im + (target.center.im - currentCenter.im) * ease,
+      };
+    }
+    justReleased = false;
+  }
+
+  function drawJointDot(ctx, tf, p, { fillColor, selected, hovered, label }) {
+    const px = tf.toPx(p);
+    if (selected) {
+      ctx.beginPath();
+      ctx.fillStyle = colors.accent;
+      ctx.globalAlpha = 0.25;
+      ctx.arc(px.x, px.y, 13, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.beginPath();
+    ctx.fillStyle = fillColor;
+    ctx.strokeStyle = colors.bg;
+    ctx.lineWidth = 1.5;
+    ctx.arc(px.x, px.y, hovered ? 7 : 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (label) {
+      ctx.fillStyle = colors.textSecondary;
+      ctx.font = `11px ${THEME_FONT}`;
+      ctx.textAlign = 'center';
+      ctx.fillText(label, px.x, px.y - 10);
+    }
+  }
+
+  /** Draw the pick-up-a-ball table line + ball, in world coords. */
+  function drawTableAndBall(ctx, tf, ballState) {
+    const tableHalfWidth = 0.55;
+    const y = PICKUP.tableY;
+    const a = tf.toPx({ re: PICKUP.ballRestX - tableHalfWidth, im: y });
+    const b = tf.toPx({ re: PICKUP.ballRestX + tableHalfWidth, im: y });
+    ctx.beginPath();
+    ctx.strokeStyle = colors.tableColor;
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+    // A few short "legs" ticks for a table read.
+    ctx.globalAlpha = 0.6;
+    ctx.lineWidth = 2;
+    for (const fx of [0.15, 0.85]) {
+      const legX = a.x + (b.x - a.x) * fx;
+      ctx.beginPath();
+      ctx.moveTo(legX, a.y);
+      ctx.lineTo(legX, a.y + 14);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    const ballPx = tf.toPx(ballState.pos);
+    const r = Math.max(4, PICKUP.ballRadius * currentScale);
+    const grad = ctx.createRadialGradient(ballPx.x - r * 0.35, ballPx.y - r * 0.35, r * 0.1, ballPx.x, ballPx.y, r);
+    grad.addColorStop(0, colors.accent);
+    grad.addColorStop(1, colors.ballColor);
+    ctx.beginPath();
+    ctx.fillStyle = grad;
+    ctx.arc(ballPx.x, ballPx.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = colors.skinOutline;
+    ctx.globalAlpha = 0.6;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  function renderGesture(state, bones) {
+    const { ctx, w, h } = cv;
+    const kind = state.gesture && state.gesture.kind;
+
+    if (lastT != null) {
+      const raw = Math.abs(state.t - lastT);
+      const circular = Math.min(raw, 1 - raw);
+      if (circular > TIME_JUMP_THRESHOLD) resetTrail();
+    }
+    lastT = state.t;
+
+    const { pts: mainPts, fk } = gestureMainPoints(bones, state.t);
+    const bbox = computeBBoxGesture(bones, fk, kind);
+    const totalReach = bones.reduce((s, b) => (MAIN_JOINT_IDS.includes(b.id) ? s + b.length : s), 0);
+    updateAutofit(bbox, totalReach);
+
+    const tf = makeTransform(currentCenter, currentScale);
+
+    ctx.save();
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = colors.bg;
+    ctx.fillRect(0, 0, w, h);
+    ctx.translate(w / 2, h / 2);
+
+    // Cache px positions for hit-testing + the e2e accessor.
+    lastGestureJointsCss = new Map();
+    for (const b of bones) {
+      const p = tf.toPx(fk.get(b.id).tip);
+      lastGestureJointsCss.set(b.id, { x: p.x + cv.w / 2, y: p.y + cv.h / 2 });
+    }
+    lastJointsCss = mainPts.map((p) => {
+      const q = tf.toPx(p);
+      return { x: q.x + cv.w / 2, y: q.y + cv.h / 2 };
+    });
+
+    if (interactive && !dragging && !gestureOverride && lastPointerLocal) {
+      hoverBoneId = hitTestGestureJoint(lastPointerLocal.x, lastPointerLocal.y, bones, fk, tf);
+      canvas.style.cursor = hoverBoneId ? 'grab' : 'default';
+    }
+
+    let ballState = null;
+    if (kind === 'pickup') {
+      ballState = pickupBallState(bones, state.t);
+      drawTableAndBall(ctx, tf, ballState);
+    }
+
+    // Metallic skin: main chain + real finger chains, all from this FK pass.
+    if (skinModeFor(state, [{ label: 'gesture' }])) {
+      const mainPx = mainPts.map((p) => tf.toPx(p));
+      const fingersWorld = fingerWorldPoints(fk);
+      const fingersPx = {};
+      for (const name of Object.keys(fingersWorld)) fingersPx[name] = fingersWorld[name].map((p) => tf.toPx(p));
+      const selectedIndex = MAIN_JOINT_IDS.indexOf(state.selectedId);
+      drawArmSkin(ctx, mainPx, fingersPx, {
+        scalePx: currentScale,
+        colors: {
+          skin: colors.skin, skinShade: colors.skinShade, skinHighlight: colors.skinHighlight, outline: colors.skinOutline, bone: colors.textSecondary,
+        },
+        xray: true,
+        selectedIndex,
+      });
+    } else {
+      // No-skin fallback: draw the bone chain as plain lines (main + fingers).
+      const drawSeg = (p0w, p1w, color) => {
+        const a = tf.toPx(p0w);
+        const b = tf.toPx(p1w);
+        ctx.beginPath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      };
+      let prev = { re: 0, im: 0 };
+      for (const id of MAIN_JOINT_IDS) {
+        const j = fk.get(id);
+        drawSeg(prev, j.tip, colors.primary);
+        prev = j.tip;
+      }
+      for (const name of FINGER_NAMES) {
+        const chain = [fk.get(`${name}1`), fk.get(`${name}2`), fk.get(`${name}3`)];
+        let fprev = chain[0].base;
+        for (const j of chain) {
+          drawSeg(fprev, j.tip, colors.accent);
+          fprev = j.tip;
+        }
+      }
+    }
+
+    // Fading trail of the end effector (palm/hand tip's most distal finger — use middle fingertip).
+    if (showTrace) {
+      const tip = fk.get('middle3') ? fk.get('middle3').tip : fk.get('palm').tip;
+      const last = trail[trail.length - 1];
+      if (!last || (last.re - tip.re) ** 2 + (last.im - tip.im) ** 2 > 1e-10) {
+        trail.push({ re: tip.re, im: tip.im });
+        if (trail.length > TRAIL_MAX) trail.shift();
+      }
+      ctx.lineCap = 'round';
+      for (let i = 1; i < trail.length; i++) {
+        const p0 = tf.toPx(trail[i - 1]);
+        const p1 = tf.toPx(trail[i]);
+        const alpha = i / trail.length;
+        ctx.beginPath();
+        ctx.strokeStyle = colors.accent;
+        ctx.globalAlpha = alpha * 0.9;
+        ctx.lineWidth = 2.5;
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Base.
+    {
+      const base = tf.toPx({ re: 0, im: 0 });
+      ctx.beginPath();
+      ctx.fillStyle = colors.textSecondary;
+      ctx.arc(base.x, base.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Joint handles: main chain (numbered/labeled like spin mode) + small
+    // finger-joint handles (shown always but subtly; full-size on hover/selection).
+    for (const id of MAIN_JOINT_IDS) {
+      const j = fk.get(id);
+      const selected = state.selectedId === id;
+      const hovered = interactive && hoverBoneId === id;
+      drawJointDot(ctx, tf, j.tip, {
+        fillColor: colors.primary, selected, hovered, label: numberJoints ? String(MAIN_JOINT_IDS.indexOf(id) + 1) : null,
+      });
+    }
+    for (const name of FINGER_NAMES) {
+      for (let j = 1; j <= 3; j++) {
+        const id = `${name}${j}`;
+        const bone = fk.get(id);
+        const selected = state.selectedId === id;
+        const hovered = interactive && hoverBoneId === id;
+        const px = tf.toPx(bone.tip);
+        const r = selected || hovered ? 4.5 : 2.6;
+        ctx.beginPath();
+        ctx.fillStyle = selected ? colors.accent : (bone && GROUP_DOT_COLOR(name));
+        ctx.globalAlpha = selected || hovered ? 1 : 0.75;
+        ctx.arc(px.x, px.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    ctx.restore();
+  }
+
+  function GROUP_DOT_COLOR(fingerName) {
+    const map = {
+      thumb: '#ffa00f', index: '#a5d75f', middle: '#8a6996', ring: '#d94415', little: '#9d162e',
+    };
+    return map[fingerName] || colors.accent;
+  }
+
   function render(state, derived) {
+    if (isGestureMode(state)) {
+      renderGesture(state, currentBones(state));
+      return;
+    }
     const { ctx, w, h } = cv;
     const components = currentComponents(state) || [];
 
@@ -202,35 +567,8 @@ export function createArmView(canvas, store, opts = {}) {
     lastT = state.t;
 
     const bbox = computeBBox(components, state, derived);
-    if (!viewInitialized) {
-      const target = fitTargetFromBBox(bbox, components);
-      currentScale = target.scale;
-      currentCenter = target.center;
-      viewInitialized = true;
-    } else if (!dragging) {
-      // Stay put while the user is manipulating the arm (the most recent
-      // components change came from a joint drag): re-fitting on every
-      // frame would make the shoulder/base visibly drift as soon as they
-      // release, even for a small, in-frame adjustment. Only re-fit for a
-      // drag-sourced change if it actually pushed the arm/path out of view;
-      // any other source (preset, editor, draw, spectrum) always re-fits.
-      const overflowed = overflowsCanvas(bbox);
-      const shouldRefit = lastComponentsSource !== 'arm' || overflowed;
-      if (shouldRefit) {
-        const target = fitTargetFromBBox(bbox, components);
-        // A drag that ended with the arm/path actually overflowing gets an
-        // immediate snap instead of the normal slow ease (see justReleased
-        // above); every other refit (including a drag that stayed in view)
-        // keeps the smooth per-frame ease.
-        const ease = (justReleased && overflowed) ? 1 : SCALE_EASE;
-        currentScale += (target.scale - currentScale) * ease;
-        currentCenter = {
-          re: currentCenter.re + (target.center.re - currentCenter.re) * ease,
-          im: currentCenter.im + (target.center.im - currentCenter.im) * ease,
-        };
-      }
-      justReleased = false;
-    }
+    const totalReach = components.reduce((s, c) => s + Math.abs(c.amp), 0);
+    updateAutofit(bbox, totalReach);
 
     const tf = makeTransform(currentCenter, currentScale);
 
@@ -291,18 +629,23 @@ export function createArmView(canvas, store, opts = {}) {
 
     // Anatomical skin (bones = components; skin deforms with the bone chain).
     // Drawn before the bone links so the bones can be layered thin/translucent
-    // on top of it, x-ray style.
+    // on top of it, x-ray style. Only the first 3 components (upper arm,
+    // forearm, hand) form the main chain the skin draws; the hand itself is
+    // a STATIC "relaxed curl" 5-finger tree anchored at that chain's tip
+    // (components 3/4, "Finger"/"Fingertip", stay part of the Fourier chain
+    // and are still drawn/draggable as thin bone struts below, unchanged).
     const skinMode = skinModeFor(state, components);
     if (skinMode && components.length) {
-      const jointsPx = pts.map((p) => tf.toPx(p));
+      const jointsPxAll = pts.map((p) => tf.toPx(p));
+      const mainPx = jointsPxAll.slice(0, Math.min(4, jointsPxAll.length));
+      const fingersPx = {};
+      const fingersWorld = spinHandFingerPoints(components, state.t, pts);
+      for (const name of Object.keys(fingersWorld)) fingersPx[name] = fingersWorld[name].map((p) => tf.toPx(p));
       const selectedIndex = components.findIndex((c) => c.id === state.selectedId);
-      drawArmSkin(ctx, jointsPx, {
+      drawArmSkin(ctx, mainPx, fingersPx, {
         scalePx: currentScale,
         colors: {
-          skin: colors.skin,
-          skinShade: colors.skinShade,
-          outline: colors.skinOutline,
-          bone: colors.textSecondary,
+          skin: colors.skin, skinShade: colors.skinShade, skinHighlight: colors.skinHighlight, outline: colors.skinOutline, bone: colors.textSecondary,
         },
         xray: true,
         selectedIndex,
@@ -434,6 +777,28 @@ export function createArmView(canvas, store, opts = {}) {
     return best;
   }
 
+  /** Same adaptive-radius nearest-joint search as hitTestJoint, over the gesture bone tree. */
+  function hitTestGestureJoint(px, py, bones, fk, tf) {
+    const all = bones.map((b) => ({ id: b.id, p: tf.toPx(fk.get(b.id).tip) }));
+    let best = null;
+    let bestDist = Infinity;
+    for (const j of all) {
+      let nearestOther = Infinity;
+      for (const other of all) {
+        if (other.id === j.id) continue;
+        const d = Math.hypot(other.p.x - j.p.x, other.p.y - j.p.y);
+        if (d < nearestOther) nearestOther = d;
+      }
+      const radius = Math.max(5, Math.min(HIT_RADIUS, nearestOther / 2));
+      const d = Math.hypot(j.p.x - px, j.p.y - py);
+      if (d <= radius && d < bestDist) {
+        bestDist = d;
+        best = j.id;
+      }
+    }
+    return best;
+  }
+
   /** Clamp a local (canvas-center-relative) point to stay within the visible canvas. */
   function clampToCanvas(x, y) {
     return {
@@ -443,19 +808,49 @@ export function createArmView(canvas, store, opts = {}) {
   }
 
   function onPointerMoveHover(evt) {
-    if (!interactive || dragging || componentsOverride) return;
+    if (!interactive || dragging) return;
     const { x, y } = localXY(evt);
     lastPointerLocal = { x, y };
     const state = store.get();
+    if (isGestureMode(state)) {
+      if (gestureOverride) return;
+      const bones = currentBones(state);
+      const { fk } = gestureMainPoints(bones, state.t);
+      const tf = makeTransform(currentCenter, currentScale);
+      hoverBoneId = hitTestGestureJoint(x, y, bones, fk, tf);
+      canvas.style.cursor = hoverBoneId ? 'grab' : 'default';
+      return;
+    }
+    if (componentsOverride) return;
     hoverK = hitTestJoint(x, y, state);
     canvas.style.cursor = hoverK >= 0 ? 'grab' : 'default';
   }
 
   function onPointerDown(evt) {
-    if (!interactive || componentsOverride) return;
+    if (!interactive) return;
     const { x, y } = localXY(evt);
     lastPointerLocal = { x, y };
     const state = store.get();
+
+    if (isGestureMode(state)) {
+      if (gestureOverride) return;
+      const bones = currentBones(state);
+      const { fk } = gestureMainPoints(bones, state.t);
+      const tf = makeTransform(currentCenter, currentScale);
+      const id = hitTestGestureJoint(x, y, bones, fk, tf);
+      if (!id) return;
+      const bone = bones.find((b) => b.id === id);
+      const parentAbsAngle = fk.get(id).absAngle - fk.get(id).relAngle;
+      store.set({ selectedId: id }, 'arm');
+      dragging = { pointerId: evt.pointerId, boneId: id, parentAbsAngle, series: bone.series };
+      store.set({ dragging: true }, 'arm');
+      canvas.setPointerCapture(evt.pointerId);
+      canvas.style.cursor = 'grabbing';
+      evt.preventDefault();
+      return;
+    }
+
+    if (componentsOverride) return;
     const k = hitTestJoint(x, y, state);
     if (k < 0) return;
     const components = currentComponents(state);
@@ -474,9 +869,26 @@ export function createArmView(canvas, store, opts = {}) {
       const { x, y } = clampToCanvas(raw.x, raw.y);
       lastPointerLocal = { x, y };
       const state = store.get();
-      const components = currentComponents(state);
       const tf = makeTransform(currentCenter, currentScale);
       const worldP = tf.toWorld(x, y);
+
+      if (dragging.boneId != null) {
+        // Gesture mode: a plain drag ROTATES the joint's mean only (the
+        // oscillation continues around the new mean); everything downstream
+        // follows automatically through forward kinematics on the next render.
+        const bones = currentBones(state);
+        const bone = bones.find((b) => b.id === dragging.boneId);
+        const fk = forwardKinematics(bones, state.t);
+        const base = fk.get(dragging.boneId).base;
+        const desiredAbsAngle = Math.atan2(worldP.im - base.im, worldP.re - base.re);
+        const harmonicSum = evalSeries(bone.series, state.t) - bone.series.mean;
+        const newMean = desiredAbsAngle - dragging.parentAbsAngle - harmonicSum;
+        store.updateJointMean(dragging.boneId, newMean, 'arm');
+        evt.preventDefault();
+        return;
+      }
+
+      const components = currentComponents(state);
       const result = invertDrag(components, dragging.k, worldP, state.t, { re: 0, im: 0 });
       const amp = Math.min(MAX_AMP, result.amp);
       if (skinModeFor(state, components) && !evt.shiftKey) {
@@ -500,11 +912,20 @@ export function createArmView(canvas, store, opts = {}) {
    * the canvas is left alone and the page scrolls normally.
    */
   function onTouchStart(evt) {
-    if (!interactive || componentsOverride) return;
+    if (!interactive) return;
     const touch = evt.touches && evt.touches[0];
     if (!touch) return;
     const { x, y } = localXY(touch);
     const state = store.get();
+    if (isGestureMode(state)) {
+      if (gestureOverride) return;
+      const bones = currentBones(state);
+      const { fk } = gestureMainPoints(bones, state.t);
+      const tf = makeTransform(currentCenter, currentScale);
+      if (hitTestGestureJoint(x, y, bones, fk, tf)) evt.preventDefault();
+      return;
+    }
+    if (componentsOverride) return;
     if (hitTestJoint(x, y, state) >= 0) evt.preventDefault();
   }
 
@@ -514,7 +935,7 @@ export function createArmView(canvas, store, opts = {}) {
       dragging = null;
       justReleased = true;
       store.set({ dragging: false }, 'arm');
-      canvas.style.cursor = hoverK >= 0 ? 'grab' : 'default';
+      canvas.style.cursor = (hoverK >= 0 || hoverBoneId) ? 'grab' : 'default';
     }
   }
 
@@ -527,6 +948,7 @@ export function createArmView(canvas, store, opts = {}) {
     canvas.addEventListener('pointerleave', () => {
       if (!dragging) {
         hoverK = -1;
+        hoverBoneId = null;
         lastPointerLocal = null;
         canvas.style.cursor = 'default';
       }
@@ -550,10 +972,19 @@ export function createArmView(canvas, store, opts = {}) {
     cv.destroy();
   }
 
-  /** Joint positions from the last render, in CSS px relative to the canvas's top-left (p_0 = base). */
+  /** Joint positions from the last render, in CSS px relative to the canvas's top-left (p_0 = base). Spin mode: full chain. Gesture mode: the 4 main-chain points. */
   function jointsPx() {
     return lastJointsCss.map((p) => ({ ...p }));
   }
 
-  return { render, resize, destroy, jointsPx };
+  /** Gesture mode only: every one of the 18 joints' last-rendered px position, keyed by bone id (e.g. 'upperArm', 'index2'). */
+  function gestureJointsPx() {
+    const out = {};
+    for (const [id, p] of lastGestureJointsCss) out[id] = { ...p };
+    return out;
+  }
+
+  return {
+    render, resize, destroy, jointsPx, gestureJointsPx, resetTrail,
+  };
 }

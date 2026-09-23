@@ -287,6 +287,7 @@ export function createDrawView(canvas, store) {
       .map((c) => fromCoeff(c, {}))
       .filter((c) => Number.isFinite(c.freq) && Number.isFinite(c.amp) && Number.isFinite(c.phase));
     if (comps.length === 0) return;
+    store.set({ motion: 'spin' }, 'draw');
     store.setComponents(comps, 'draw');
     store.set({ mode: 'arm' }, 'draw');
   });

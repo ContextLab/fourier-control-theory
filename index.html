@@ -79,13 +79,15 @@
       <div class="control-group">
         <label for="circles-toggle"><input type="checkbox" id="circles-toggle" checked> Circles</label>
       </div>
-      <div class="control-group" id="skin-toggle-group" title="Skin is drawn only for the human-arm preset (every component needs a label)">
-        <label for="skin-toggle"><input type="checkbox" id="skin-toggle" checked> Show arm skin</label>
+      <div class="control-group" id="skin-toggle-group" title="Metallic shell is drawn only for the human-arm chain/tree (every bone needs a label)">
+        <label for="skin-toggle"><input type="checkbox" id="skin-toggle" checked> Show arm shell</label>
       </div>
       <div class="control-group">
         <label for="presets">Preset</label>
         <select id="presets">
-          <option value="arm" selected>Human arm (5 joints)</option>
+          <option value="wave" selected>Human arm &mdash; wave hello</option>
+          <option value="pickup">Human arm &mdash; pick up ball</option>
+          <option value="arm">Human arm &mdash; Fourier spin (links = components)</option>
           <option value="">&mdash;</option>
           <option value="circle">Circle</option>
           <option value="ellipse">Ellipse</option>
@@ -107,11 +109,13 @@
         <div class="card view-canvas-wrap">
           <canvas id="arm-canvas" tabindex="0" aria-label="Interactive robot arm. Drag a joint to rotate the bone below it; shift-drag to also change that bone's length. On bare (non-anatomical) links, drag sets both length and angle."></canvas>
         </div>
-        <p class="caption">The puppet arm: each link is one Fourier component &mdash; length = amplitude,
-          spin rate = frequency, starting angle = phase. The fading trail is the end-effector path z(t).
-          With the human-arm preset (bones outlined by skin), plain-dragging a joint rotates that bone
-          only (everything downstream follows); shift-drag also changes the bone's length. On bare
-          (non-skinned) links, dragging sets both the link's length and its angle at once.</p>
+        <p class="caption">In gesture mode (the default), the arm+hand is a joint-angle TREE: dragging any
+          joint (main or finger) rotates that joint's mean angle only &mdash; the oscillation continues
+          around the new mean, and everything downstream follows. In Fourier-spin mode, each link is one
+          Fourier component &mdash; length = amplitude, spin rate = frequency, starting angle = phase &mdash;
+          and plain-dragging a joint rotates that bone only (shift-drag also changes its length; on bare,
+          non-anatomical links, dragging sets both length and angle at once). The fading trail is the
+          end-effector path.</p>
         <div class="card view-canvas-wrap small" style="margin-top: var(--spacing-lg);">
           <canvas id="spectrum-canvas" tabindex="0" aria-label="Frequency spectrum. Drag a stem vertically for amplitude, horizontally for frequency, alt-drag or use the phase ring or mouse wheel for phase, double-click to add a component, Delete to remove the selected one, or shift-drop one stem onto another to merge them."></canvas>
         </div>
@@ -123,19 +127,20 @@
       </div>
       <div class="card components-card">
         <div class="card-header">
-          <span class="card-title">Components</span>
-          <div class="card-header-actions">
+          <span class="card-title" id="components-card-title">Joints</span>
+          <div class="card-header-actions" id="spin-only-actions" style="display:none;">
             <button id="sort-by-freq" class="btn btn-secondary btn-small" title="Reorders the link chain by signed frequency (ascending) — this minimizes the frequency gap Δf between adjacent links, so adjacent motors spin at similar speeds. It changes how the arm bends and moves, not the traced path (the sum, and therefore the path, is order-independent)"><i class="fa-solid fa-arrow-down-short-wide"></i> Sort by f</button>
             <button id="add-component" class="btn btn-secondary btn-small"><i class="fa-solid fa-plus"></i> Add</button>
           </div>
         </div>
-        <div class="editor-header-row">
+        <div class="editor-header-row" id="spin-only-header" style="display:none;">
           <span></span><span>Freq</span><span>Amp</span><span>Phase&deg;</span><span></span>
         </div>
         <div id="editor"></div>
-        <p class="caption">Each row is one term <em>c</em>&middot;e<sup>i2&pi;<em>ft</em></sup> of the
-          series. Selected row is highlighted; edits here, on the arm, or on the spectrum all stay in
-          sync.</p>
+        <p class="caption" id="components-caption">Each row is one joint's periodic angle
+          q(t) = q&#772; + &sum; a<sub>h</sub>cos(2&pi;ht + &psi;<sub>h</sub>): the mean q&#772; (set by
+          dragging the joint) plus a few harmonics. Fingers are grouped into collapsible sections.
+          Selected row is highlighted; edits here, on the arm, or on the spectrum all stay in sync.</p>
       </div>
     </div>
   </section>

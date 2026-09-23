@@ -179,6 +179,56 @@
 
 .editor-footer { display: flex; gap: var(--spacing-sm); margin-top: var(--spacing-sm); }
 
+/* ---- Gesture-mode joint editor: mean angle + compact harmonic fields ---- */
+
+.gesture-joint-row {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  grid-template-areas: "swatch label" "mean mean" "harm harm";
+  align-items: center;
+  gap: var(--spacing-xs) var(--spacing-sm);
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--surface-color);
+  margin-bottom: var(--spacing-xs);
+}
+.gesture-joint-row .editor-swatch { grid-area: swatch; }
+.gesture-joint-row .editor-label { grid-area: label; grid-column: auto; margin-bottom: 0; }
+.gesture-joint-row .editor-field { grid-area: mean; flex-direction: row; align-items: center; gap: var(--spacing-xs); }
+.gesture-joint-row .editor-field input[type='number'] { width: 4.2rem; flex: none; }
+.gesture-joint-row .editor-field input[type='range'] { flex: 1; }
+.gesture-joint-row.selected { border-color: var(--primary-color); background: var(--surface-hover); }
+
+.editor-harmonics { grid-area: harm; display: flex; flex-wrap: wrap; gap: 2px var(--spacing-xs); align-items: center; }
+.editor-harmonics .harm-label { font-size: 0.65rem; color: var(--text-secondary); text-transform: uppercase; }
+.editor-harmonics input[type='number'] {
+  width: 3.4rem;
+  padding: 0.2rem 0.3rem;
+  font-size: 0.78rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-color);
+  color: var(--text-primary);
+}
+
+.editor-finger-section {
+  margin-bottom: var(--spacing-sm);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-xs);
+}
+.editor-finger-section > summary {
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+  padding: var(--spacing-xs);
+}
+.editor-finger-section .gesture-joint-row { margin: var(--spacing-xs) 0 0; }
+
 /* ============ Draw tab ============ */
 
 .draw-layout { display: grid; grid-template-columns: 2fr 1fr; gap: var(--spacing-lg); align-items: start; }

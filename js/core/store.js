@@ -73,6 +73,14 @@ function defaultState() {
     K: 50,
     bandwidth: 5,
     drawing: { raw: [], coeffs: [], active: false },
+    // 'spin' = the classic Fourier-spin chain (state.components, unbounded
+    // theta = phase + 2*pi*freq*t); 'gesture' = the periodic joint-angle-tree
+    // model (state.gesture, see core/gesture.js). Both can coexist in state;
+    // `motion` says which one is currently driving the Arm/Control views.
+    motion: 'gesture',
+    // { bones: Array<object>, selectedJointId: ?string } — see core/gesture.js
+    // for the bone-tree shape. null until app.js loads a gesture preset.
+    gesture: null,
   };
 }
 
@@ -179,6 +187,40 @@ export function createStore(initial = {}) {
       state = { ...state, components: withIds(list) };
       dirty = true;
       notify(new Set(['components']), source);
+    },
+
+    /** Replace the whole gesture bone tree (e.g. loading a preset). */
+    setGesture(bones, source) {
+      state = { ...state, gesture: { ...state.gesture, bones } };
+      notify(new Set(['gesture']), source);
+    },
+
+    /**
+     * Patch one gesture joint's mean angle (a plain drag rotates the joint's
+     * mean only; the oscillation continues around the new mean, and every
+     * downstream bone follows automatically through forward kinematics).
+     */
+    updateJointMean(id, mean, source) {
+      if (!state.gesture) return;
+      const bones = state.gesture.bones.map((b) => (
+        b.id === id ? { ...b, series: { ...b.series, mean } } : b
+      ));
+      state = { ...state, gesture: { ...state.gesture, bones } };
+      notify(new Set(['gesture']), source);
+    },
+
+    /** Patch one harmonic of one gesture joint's series (spectrum-view drag). */
+    updateJointHarmonic(id, h, patch, source) {
+      if (!state.gesture) return;
+      const bones = state.gesture.bones.map((b) => {
+        if (b.id !== id) return b;
+        const harmonics = b.series.harmonics.map((entry) => (
+          entry.h === h ? { ...entry, ...patch } : entry
+        ));
+        return { ...b, series: { ...b.series, harmonics } };
+      });
+      state = { ...state, gesture: { ...state.gesture, bones } };
+      notify(new Set(['gesture']), source);
     },
 
     /** Subscribe to state changes, optionally filtered to a set of keys. Returns an unsubscribe function. */

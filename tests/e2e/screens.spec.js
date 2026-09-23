@@ -153,6 +153,10 @@ const comps = (page) =>
 test('dragging a joint tip rotates that bone, keeps upstream fixed, and updates the editor', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
+  // This test exercises Fourier-spin mode's own drag contract; gesture mode
+  // (the app's default preset) is covered by its own gesture-specific tests below.
+  await page.selectOption('#presets', 'arm');
+  await page.waitForTimeout(50);
   const box = await pauseAndBox(page, '#arm-canvas');
 
   const before = await comps(page);
@@ -207,6 +211,8 @@ test('dragging a joint tip rotates that bone, keeps upstream fixed, and updates 
 test('dragging a spectrum stem upward increases that component amplitude', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
+  await page.selectOption('#presets', 'arm'); // this test exercises Fourier-spin mode's spectrum stems
+  await page.waitForTimeout(50);
   const box = await pauseAndBox(page, '#spectrum-canvas');
 
   const before = await comps(page);
@@ -375,6 +381,8 @@ async function getLimits(page) {
 test('spectrum: dragging a stem far past the right edge keeps |freq| within MAX_FREQ', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
+  await page.selectOption('#presets', 'arm'); // Fourier-spin mode's spectrum, not gesture mode's
+  await page.waitForTimeout(50);
   const { MAX_FREQ } = await getLimits(page);
   const box = await pauseAndBox(page, '#spectrum-canvas');
   const heads = await page.evaluate(() => window.fourierDemo.spectrumView.stemHeads());
@@ -410,6 +418,8 @@ test('spectrum: dragging a stem far past the right edge keeps |freq| within MAX_
 test('arm: shift-dragging a joint far off-canvas keeps amp within MAX_AMP', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
+  await page.selectOption('#presets', 'arm'); // shift-drag-changes-length is a Fourier-spin-mode contract
+  await page.waitForTimeout(50);
   const { MAX_AMP } = await getLimits(page);
   const box = await pauseAndBox(page, '#arm-canvas');
   const joints = await page.evaluate(() => window.fourierDemo.armView.jointsPx());
@@ -433,6 +443,8 @@ test('arm: shift-dragging a joint far off-canvas keeps amp within MAX_AMP', asyn
 test('editor: freq input of 1e6 is clamped within MAX_FREQ and frame time stays reasonable', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
+  await page.selectOption('#presets', 'arm'); // this row's first number input is Freq only in Fourier-spin mode
+  await page.waitForTimeout(50);
   const { MAX_FREQ } = await getLimits(page);
   const freqInput = page.locator('#editor .editor-row').first().locator('input[type="number"]').first();
   await expect(freqInput).toBeVisible();
@@ -496,6 +508,7 @@ test('control tab: bandwidth B=2', async ({ page }) => {
 test('perf smoke: 150 components keep median frame time under 20ms', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
+  await page.selectOption('#presets', 'arm'); // "150 components" is a Fourier-spin-mode scenario
   await page.waitForTimeout(150);
 
   const canvas = page.locator('#spectrum-canvas');
@@ -545,14 +558,8 @@ test('perf smoke: 150 components keep median frame time under 20ms', async ({ pa
 // Round-2 red-team fixes (notes/redteam/{r2-func,r2-math-text,fix-plan}.md)
 // ---------------------------------------------------------------------------
 
-test('mobile 390px: no element in the Arm panel is wider than the viewport', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  const errors = await gotoApp(page);
-  expect(errors).toEqual([]);
-  await page.click('#tab-arm');
-  await page.waitForTimeout(150);
-
-  const overflowing = await page.evaluate(() => {
+async function noOverflow(page) {
+  return page.evaluate(() => {
     const vw = document.documentElement.clientWidth;
     const out = [];
     document.querySelectorAll('#panel-arm *').forEach((el) => {
@@ -563,7 +570,25 @@ test('mobile 390px: no element in the Arm panel is wider than the viewport', asy
     });
     return out;
   });
-  expect(overflowing, `elements wider than the viewport:\n${JSON.stringify(overflowing, null, 2)}`).toEqual([]);
+}
+
+test('mobile 390px: no element in the Arm panel is wider than the viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const errors = await gotoApp(page);
+  expect(errors).toEqual([]);
+  await page.click('#tab-arm');
+  await page.waitForTimeout(150);
+
+  // Default (gesture mode: the per-joint editor with collapsible finger sections).
+  const overflowingGesture = await noOverflow(page);
+  expect(overflowingGesture, `elements wider than the viewport (gesture mode):\n${JSON.stringify(overflowingGesture, null, 2)}`).toEqual([]);
+  await expect(page.locator('#panel-arm .caption').first()).toBeVisible();
+
+  // Fourier-spin mode (Freq/Amp/Phase editor rows, Sort/Add buttons).
+  await page.selectOption('#presets', 'arm');
+  await page.waitForTimeout(150);
+  const overflowing = await noOverflow(page);
+  expect(overflowing, `elements wider than the viewport (spin mode):\n${JSON.stringify(overflowing, null, 2)}`).toEqual([]);
 
   // The Add button and captions must actually be visible once scrolled to,
   // not just narrower than the viewport (e.g. clipped by an ancestor's
@@ -578,6 +603,8 @@ test('mobile 390px: no element in the Arm panel is wider than the viewport', asy
 test('editor: blur re-patches the freq input to the sanitized store value (1e6 -> MAX_FREQ)', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
+  await page.selectOption('#presets', 'arm');
+  await page.waitForTimeout(50);
   const { MAX_FREQ } = await getLimits(page);
   const freqInput = page.locator('#editor .editor-row').first().locator('input[type="number"]').first();
   await freqInput.fill('1000000');
@@ -593,6 +620,8 @@ test('editor: blur re-patches the freq input to the sanitized store value (1e6 -
 test('editor: non-finite text (1e400) reverts to the current value on blur instead of going blank', async ({ page }) => {
   await gotoApp(page);
   await page.click('#tab-arm');
+  await page.selectOption('#presets', 'arm');
+  await page.waitForTimeout(50);
   const freqInput = page.locator('#editor .editor-row').first().locator('input[type="number"]').first();
   const before = await freqInput.inputValue();
 
@@ -691,4 +720,159 @@ test('draw mode: Send to Arm at K=max reproduces the drawn path', async ({ page 
   }
   const rms = Math.sqrt(sumSq / M);
   expect(rms, `RMS between drawn path and Send-to-Arm(K=max) arm path was ${rms}`).toBeLessThan(0.01);
+});
+
+// ---------------------------------------------------------------------------
+// Gesture mode: articulated arm+hand (default preset), pick-up-a-ball, joint
+// dragging, and Control-tab bandwidth freezing.
+// ---------------------------------------------------------------------------
+
+/** Sample armView.gestureJointsPx() at N evenly-spaced times over one period. */
+async function sampleGestureJoints(page, view, n = 16) {
+  return page.evaluate(async ({ viewName, n: count }) => {
+    const { store } = window.fourierDemo;
+    const v = window.fourierDemo[viewName];
+    store.set({ playing: false }, 'test');
+    const out = [];
+    for (let i = 0; i <= count; i += 1) {
+      store.setTime(i / count);
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      out.push(v.gestureJointsPx());
+    }
+    return out;
+  }, { viewName: view, n });
+}
+
+test('gesture: default preset is "wave hello" with a fully articulated 5-finger hand', async ({ page }) => {
+  const errors = await gotoApp(page);
+  expect(errors).toEqual([]);
+  await page.click('#tab-arm');
+  expect(await page.locator('#presets').inputValue()).toBe('wave');
+  expect(await page.evaluate(() => window.fourierDemo.store.get().motion)).toBe('gesture');
+
+  const first = await page.evaluate(() => window.fourierDemo.armView.gestureJointsPx());
+  const fingers = ['thumb', 'index', 'middle', 'ring', 'little'];
+  for (const name of fingers) {
+    for (const j of [1, 2, 3]) expect(first).toHaveProperty(`${name}${j}`);
+  }
+  for (const id of ['upperArm', 'forearm', 'palm']) expect(first).toHaveProperty(id);
+  expect(Object.keys(first).length).toBe(18); // 3 main + 5 x 3 finger joints
+
+  const samples = await sampleGestureJoints(page, 'armView');
+  const xs = samples.map((s) => s.middle3.x);
+  expect(Math.max(...xs) - Math.min(...xs), 'fingertip x must visibly oscillate over the period').toBeGreaterThan(5);
+});
+
+test('gesture: elbow relative angle stays within a human-ish range across the wave', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-arm');
+  const maxAbsDeg = await page.evaluate(() => {
+    const { store } = window.fourierDemo;
+    const bones = store.get().gesture.bones;
+    const forearm = bones.find((b) => b.id === 'forearm');
+    let maxAbs = 0;
+    for (let i = 0; i <= 100; i += 1) {
+      const t = i / 100;
+      let v = forearm.series.mean;
+      for (const h of forearm.series.harmonics) v += h.amp * Math.cos(2 * Math.PI * h.h * t + h.phase);
+      maxAbs = Math.max(maxAbs, Math.abs(v));
+    }
+    return maxAbs * (180 / Math.PI);
+  });
+  expect(maxAbsDeg).toBeLessThan(170);
+});
+
+test('gesture: dragging a joint on the arm changes that joint\'s mean angle (rotate-only)', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-arm');
+  const box = await page.locator('#arm-canvas').boundingBox();
+  await page.evaluate(() => window.fourierDemo.store.set({ playing: false }, 'test'));
+  await page.waitForTimeout(150);
+
+  const before = await page.evaluate(() => {
+    const b = window.fourierDemo.store.get().gesture.bones.find((x) => x.id === 'forearm');
+    return b.series.mean;
+  });
+  const joints = await page.evaluate(() => window.fourierDemo.armView.gestureJointsPx());
+  const forearmPx = joints.forearm;
+  const upperArmPx = joints.upperArm;
+
+  await page.mouse.move(box.x + forearmPx.x, box.y + forearmPx.y);
+  await page.mouse.down();
+  // Drag perpendicular to the upperArm->forearm segment, a good distance,
+  // to guarantee a real rotation rather than a sub-pixel nudge.
+  const dx = forearmPx.x - upperArmPx.x;
+  const dy = forearmPx.y - upperArmPx.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len;
+  const ny = dx / len;
+  await page.mouse.move(box.x + forearmPx.x + nx * 60, box.y + forearmPx.y + ny * 60, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+
+  const after = await page.evaluate(() => {
+    const b = window.fourierDemo.store.get().gesture.bones.find((x) => x.id === 'forearm');
+    return b.series.mean;
+  });
+  expect(Math.abs(after - before), `mean angle must change from a drag: before=${before} after=${after}`).toBeGreaterThan(0.05);
+});
+
+test('gesture: pick-up-a-ball preset lifts the ball off the table during the grasp, then returns it to rest', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-arm');
+  await page.selectOption('#presets', 'pickup');
+  await page.waitForTimeout(50);
+  expect(await page.evaluate(() => window.fourierDemo.store.get().gesture.kind)).toBe('pickup');
+
+  const { attachedCount, maxRise, restPos } = await page.evaluate(() => {
+    const { store, gesture } = window.fourierDemo;
+    const bones = store.get().gesture.bones;
+    let attachedCount = 0;
+    let maxRise = -Infinity;
+    for (let i = 0; i <= 200; i += 1) {
+      const t = i / 200;
+      const st = gesture.pickupBallState(bones, t);
+      if (st.attached) {
+        attachedCount += 1;
+        maxRise = Math.max(maxRise, st.pos.im - gesture.PICKUP.tableY);
+      }
+    }
+    const restSt = gesture.pickupBallState(bones, 0);
+    return { attachedCount, maxRise, restPos: restSt.pos };
+  });
+  expect(attachedCount, 'the ball must be attached (grasped) for some portion of the period').toBeGreaterThan(0);
+  expect(maxRise, 'the ball must visibly rise above the table while grasped').toBeGreaterThan(0.02);
+  const pickup = await page.evaluate(() => window.fourierDemo.gesture.PICKUP);
+  expect(restPos.re).toBeCloseTo(pickup.ballRestX, 6);
+  expect(restPos.im).toBeCloseTo(pickup.tableY, 6);
+});
+
+test('gesture: Control tab bandwidth B=0 freezes the arm at its mean pose', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-control');
+  await page.waitForTimeout(150);
+
+  const bandwidth = page.locator('#bandwidth');
+  await bandwidth.fill('0');
+  await bandwidth.dispatchEvent('input');
+  await page.waitForTimeout(100);
+
+  // The (non-interactive) Control-arm view eases its autofit scale/center
+  // toward the current bbox every frame rather than snapping instantly, so
+  // give it time to fully converge before comparing — otherwise a residual
+  // few px of unconverged easing (not an unfrozen pose) would fail the check.
+  const posAt = async (t) => {
+    await page.evaluate((tt) => window.fourierDemo.store.setTime(tt), t);
+    await page.waitForTimeout(500);
+    return page.evaluate(() => window.fourierDemo.controlArmView.gestureJointsPx());
+  };
+  const p0 = await posAt(0);
+  const p1 = await posAt(0.5);
+  for (const id of Object.keys(p0)) {
+    // A couple of px of residual autofit easing (not a real pose change) is
+    // tolerated; the wave/pickup presets swing joints by tens of px at this
+    // scale, so this threshold clearly distinguishes "frozen" from "moving".
+    expect(Math.abs(p1[id].x - p0[id].x), `${id}.x must be frozen at B=0`).toBeLessThan(2);
+    expect(Math.abs(p1[id].y - p0[id].y), `${id}.y must be frozen at B=0`).toBeLessThan(2);
+  }
 });

@@ -11,15 +11,17 @@
   <p>The demo has three tabs.</p>
   <ul>
     <li>
-      <strong>Arm.</strong> An animated chain of links (the "puppet") and its
-      power/amplitude spectrum. They are two views of the same data. The default preset
-      draws the chain as a human arm: each Fourier component is a bone (upper arm, forearm,
-      hand, finger, fingertip), and a skin outline bends around the shoulder, elbow, wrist,
-      and knuckle joints. In this human-arm view, a plain drag rotates the bone: its length
-      stays fixed, and the joint swings to follow your pointer's direction. Shift-drag also
-      changes its length, landing the joint under the pointer. Untick
-      <em>Show arm skin</em> to work with the bare links, where a plain drag does the full
-      move (length and angle together).
+      <strong>Arm.</strong> An animated arm/hand and its spectrum — two views of the same
+      data — in one of two <em>motions</em>, picked from the Preset menu.
+      <strong>Gesture mode</strong> (the default: "wave hello" or "pick up ball") is a fully
+      articulated human arm and hand — shoulder, elbow, wrist, and 5 separate fingers (3
+      joints each) — doing a real, periodic gesture; dragging any joint rotates its
+      <em>mean</em> angle only, and the spectrum shows that joint's own harmonics (see §4).
+      <strong>Fourier-spin mode</strong> ("Fourier spin" preset, or any shape) is the original
+      picture: each component is a bone spinning at a constant rate, and a plain drag rotates
+      that bone (shift-drag also changes its length); the hand is still drawn, articulated,
+      but only the index finger's two joints are real components — the rest just mirror its
+      curl. Untick <em>Show arm shell</em> to work with the bare links.
     </li>
     <li>
       <strong>Draw.</strong> Sketch any closed-ish shape freehand; the app decomposes it into
@@ -37,9 +39,11 @@
   </ul>
   <p>Interactions that work wherever the interactive arm or spectrum view appears:</p>
   <ul>
-    <li><strong>Drag a joint's tip</strong> in the <strong>Arm</strong> tab to move it; every
-      link further out on the chain stays rigidly attached and slides along with it (see §3.3
-      for how the human-arm view's plain drag differs, rotating rather than relocating).</li>
+    <li><strong>Drag a joint's tip</strong> in the <strong>Arm</strong> tab to move it. In
+      Fourier-spin mode every link further out stays rigidly attached and slides along with it
+      (see §3.3 for how the human-arm view's plain drag differs, rotating rather than
+      relocating); in gesture mode, a drag rotates that joint's mean angle only and everything
+      downstream (including the whole hand, for a main-chain joint) follows (see §4.3).</li>
     <li><strong>Drag a stem</strong> in the spectrum view: vertical motion changes that
       component's amplitude, horizontal motion changes its frequency (it snaps to the nearest
       integer). To change phase instead, hold <strong>Alt/Option</strong> while dragging, drag
@@ -264,9 +268,10 @@
     The arm and $\theta$ panel both now show the <em>filtered</em> arm: $c_k \mapsto H(f_k)\,
     c_k$ shrinks that link's length by $|H(f_k)|$ and adds a constant phase offset $\arg
     H(f_k) = -\arctan(f_k/f_c)$ to its starting angle. Watch the link visibly shorten in the
-    arm view, and on the $\theta$ trace watch its line shift downward by that same constant
-    offset — the line's <em>slope</em> (the joint's spin rate $f_k$) is untouched, since lag
-    rotates and scales each coefficient without changing its frequency.
+    arm view, and on the $\theta$ trace watch its line shift by that same constant offset —
+    downward for a positive-frequency joint, upward for a negative one, since $\arg H(f)$ has
+    the opposite sign of $f$ — while the line's <em>slope</em> (the joint's spin rate $f_k$) is
+    untouched, since lag rotates and scales each coefficient without changing its frequency.
   </p>
 </div>
 
@@ -390,6 +395,96 @@
     $B=1$. Why does the traced path become a circle? Now raise $B$ to $3$, then $7$, watching
     the corners sharpen a little more each time as the next surviving harmonic (see §3.2 on
     bandwidth as truncation) comes back into the sum.
+  </p>
+</div>
+
+<h2>4. From spinning links to real gestures</h2>
+
+<div class="card">
+  <p>
+    §3.5 already flagged the problem: a real joint can't sustain $\theta_k(t) = \varphi_k +
+    2\pi f_k t$ forever, because that's an unbounded, ever-growing angle, and every real joint
+    has a limited range of motion. It's not just a limit on <em>how much</em> a spin-mode joint
+    moves — the shape of the motion itself is wrong. A wave, or a reach-and-grasp, is
+    <em>periodic</em> (the arm returns to the same pose every cycle) but not simply "spins and
+    comes back around": the elbow bends one way then the other, it doesn't keep turning in the
+    same direction. No choice of constant $f_k$ produces that. Gesture mode is what you get by
+    fixing exactly this.
+  </p>
+
+  <h3>4.1 A joint trajectory is (still) a Fourier series</h3>
+  <p>
+    The fix is to stop demanding that $\theta_k(t)$ be linear in $t$, and instead let each
+    joint's own <strong>relative</strong> angle be an ordinary, bounded, periodic Fourier
+    series in its own right:
+  </p>
+  $$ q_j(t) = \bar q_j + \sum_{h=1}^{H} a_{j,h} \cos(2\pi h t + \psi_{j,h}), \qquad H \le 4. $$
+  <p>
+    This is exactly §1.1's synthesis formula again — a mean plus a handful of harmonics — just
+    applied in <strong>joint space</strong> (one series per joint angle) instead of
+    <strong>task space</strong> (one series for the 2-D tip position $z(t)$). Robotics uses
+    this idea under names like periodic or "excitation" trajectories: a short Fourier series is
+    a convenient, smooth, exactly-periodic way to command a joint, with an explicit knob (drop
+    high $h$) for how "sharp" the motion is allowed to be. Forward kinematics still accumulates
+    relative angles into absolute ones exactly as in §2.1's $\theta_k = \sum_{i \le k} q_i$; the
+    only thing that changed is what $q_i(t)$ is allowed to look like.
+  </p>
+
+  <h3>4.2 Forward kinematics is nonlinear: joint space &ne; task space</h3>
+  <p>
+    Because $p_j(t) = p_{j-1}(t) + L_j e^{i\theta_j(t)}$ involves $e^{i(\cdot)}$ of a
+    <em>sum</em> of the joint series, the tip path $z(t)$ is <strong>not</strong> simply the sum
+    of the joint spectra — unlike spin mode, where task-space and "joint-space" frequencies
+    were literally the same numbers $f_k$. A single harmonic in $q_j(t)$ spreads across many
+    harmonics of $z(t)$ once it passes through $\sin$/$\cos$ of a sum. This is exactly the
+    joint-space/task-space distinction from §2.2, sharpened: the two spaces don't just use
+    different coordinates, their <em>frequency content</em> genuinely differs, because the map
+    between them is nonlinear. The spectrum view's joint-angle stems (in degrees, one group per
+    joint) are the honest picture of what's actually being commanded; the tip path is only
+    recovered by running it through forward kinematics.
+  </p>
+
+  <h3>4.3 Dragging a joint sets its mean</h3>
+  <p>
+    In gesture mode, dragging a joint rotates $\bar q_j$, the constant term of its series,
+    leaving every $a_{j,h}$ and $\psi_{j,h}$ untouched — the oscillation keeps running, just
+    recentered around the new mean. Because $\theta_j$ accumulates every ancestor's $q_i(t)$,
+    dragging a main-chain joint (shoulder, elbow, or wrist) carries the whole hand with it,
+    exactly as in §3.3's spin-mode chain; dragging one finger joint moves only that finger's
+    remaining segments.
+  </p>
+
+  <h3>4.4 Bandwidth in joint space: a grasp that can miss</h3>
+  <p>
+    The Control tab's bandwidth $B$ and feedback-lag $H(h) = 1/(1+ih/f_c)$ now apply
+    per-<em>harmonic</em> to each joint's series (§2.6's filter, reused, with the harmonic index
+    $h$ standing in for frequency): dropping $h>B$ truncates that joint's motion, and lag
+    shrinks and phase-delays whatever survives. $B=0$ keeps only every joint's mean, which
+    freezes the whole arm at a static pose — the periodic-motion analogue of spin mode's "every
+    link stuck at its $t=0$ phase." Because the reach in the pick-up-ball gesture is itself
+    produced by a handful of harmonics, filtering them away can shrink the reach enough that the
+    hand never actually gets close enough to the ball: the grasp condition (fingertips within a
+    small radius, fingers flexed past a threshold) simply never fires, and the ball stays on the
+    table. That is a real, physically sensible failure mode for a band-limited actuator, not a
+    bug — try it below.
+  </p>
+  <p>
+    <strong>Try this.</strong> Load the "pick up ball" preset, go to the Control tab, and lower
+    the bandwidth $B$ a few steps at a time. Watch the reach get smaller and smaller until the
+    hand stops reaching the ball at all. Then set $B=0$ and confirm the arm freezes at its
+    resting (mean) pose.
+  </p>
+
+  <h3>4.5 Spin mode is the $q_j$-linear-in-$t$ special case</h3>
+  <p>
+    One point of contact remains: a spin-mode joint with frequency $f_k = 0$ is just a constant
+    angle $\theta_k = \varphi_k$ — a zero-harmonic gesture joint with $\bar q_k = \varphi_k$.
+    Spin mode's general case, $f_k \ne 0$, is what gesture mode deliberately does
+    <em>not</em> allow: it would require an unbounded linear term in $q_j(t)$, which is
+    periodic-Fourier-series shaped for no finite period and is exactly the "keeps spinning
+    through ranges no joint could reach" problem from §3.5. Gesture mode trades that unbounded
+    generality for boundedness — which is also precisely what makes a wave or a grasp
+    possible.
   </p>
 </div>
 
