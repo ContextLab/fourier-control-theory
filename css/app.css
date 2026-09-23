@@ -1,0 +1,194 @@
+/* Layout specific to the Fourier <-> Control Theory demo. */
+
+.container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 0 var(--spacing-xl) var(--spacing-2xl);
+}
+
+/* ============ Tabs ============ */
+
+.tabs {
+  display: flex;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-lg);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+}
+
+.tab-btn {
+  padding: 0.75rem 1.25rem;
+  background: transparent;
+  border: none;
+  border-bottom: 3px solid transparent;
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 1rem;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.tab-btn:hover { color: var(--text-primary); }
+.tab-btn.active { color: var(--primary-color); border-bottom-color: var(--primary-color); }
+
+.tab-panel { display: none; flex-direction: column; gap: var(--spacing-lg); }
+.tab-panel.active { display: flex; }
+
+/* ============ View grid (arm tab, control tab) ============ */
+
+.view-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: var(--spacing-lg);
+  align-items: start;
+}
+
+.view-canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 420px;
+  border-radius: var(--radius-md);
+  background: var(--bg-color);
+  touch-action: none;
+}
+
+.view-canvas-wrap.small canvas { height: 260px; }
+
+/* ============ Editor list ============ */
+
+#editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: var(--spacing-xs);
+}
+
+.editor-row {
+  display: grid;
+  grid-template-columns: 18px repeat(3, minmax(0, 1fr)) auto;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--surface-color);
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.editor-label {
+  grid-column: 1 / -1;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 2px;
+}
+
+.editor-row.selected { border-color: var(--primary-color); background: var(--surface-hover); }
+
+.editor-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--border-color);
+}
+
+.editor-field { display: flex; flex-direction: column; gap: 2px; }
+.editor-field label { font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.editor-field input[type='number'] {
+  width: 100%;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-color);
+  color: var(--text-primary);
+}
+.editor-field input[type='range'] { width: 100%; height: 4px; }
+
+.editor-header-row {
+  display: grid;
+  grid-template-columns: 18px repeat(3, minmax(0, 1fr)) auto;
+  gap: var(--spacing-sm);
+  padding: 0 var(--spacing-sm);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.editor-footer { display: flex; gap: var(--spacing-sm); margin-top: var(--spacing-sm); }
+
+/* ============ Draw tab ============ */
+
+.draw-layout { display: grid; grid-template-columns: 2fr 1fr; gap: var(--spacing-lg); align-items: start; }
+
+.draw-canvas-wrap { position: relative; }
+.draw-canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 480px;
+  border-radius: var(--radius-md);
+  background: var(--bg-color);
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.draw-hint {
+  position: absolute;
+  top: var(--spacing-md);
+  left: var(--spacing-md);
+  padding: 0.4rem 0.8rem;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  border-radius: var(--radius-md);
+  font-size: 0.85rem;
+  pointer-events: none;
+}
+
+.draw-panel { display: flex; flex-direction: column; gap: var(--spacing-md); }
+.draw-panel .btn-row { display: flex; gap: var(--spacing-sm); flex-wrap: wrap; }
+
+.stat-row { display: flex; justify-content: space-between; font-size: 0.9rem; color: var(--text-secondary); }
+.stat-row strong { color: var(--text-primary); }
+
+/* ============ Bandwidth / control panel ============ */
+
+.bode-canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 140px;
+  border-radius: var(--radius-md);
+  background: var(--bg-color);
+}
+
+/* ============ Tutorial ============ */
+
+#tutorial {
+  line-height: 1.7;
+}
+#tutorial h2 { margin-top: var(--spacing-xl); }
+#tutorial h2:first-child { margin-top: 0; }
+#tutorial ul, #tutorial ol { margin: var(--spacing-sm) 0 var(--spacing-md) var(--spacing-xl); color: var(--text-secondary); }
+#tutorial .katex-display { overflow-x: auto; overflow-y: hidden; padding: var(--spacing-sm) 0; }
+
+/* ============ Responsive ============ */
+
+@media (max-width: 900px) {
+  .view-grid, .draw-layout { grid-template-columns: 1fr; }
+  .container { padding: 0 var(--spacing-md) var(--spacing-xl); }
+}
+
+@media (max-width: 480px) {
+  .demo-nav { padding: var(--spacing-sm) var(--spacing-md); }
+  .view-canvas-wrap canvas, .draw-canvas-wrap canvas { height: 320px; }
+  .editor-row, .editor-header-row { grid-template-columns: 14px repeat(3, minmax(0, 1fr)) auto; gap: var(--spacing-xs); }
+  .controls-panel { gap: var(--spacing-sm); padding: var(--spacing-sm); }
+  input[type='range'] { width: 90px; }
+}
+
+html, body { overflow-x: hidden; max-width: 100%; }

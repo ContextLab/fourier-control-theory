@@ -1,0 +1,317 @@
+<p>
+  This page is a playground for one idea: <strong>a robot arm whose joints spin at constant
+  rates is a Fourier series, drawn by hand.</strong> The tutorial below walks through the
+  Fourier-analysis side, the control-theory side, and then the dictionary that translates
+  between them. Skim the "quick tour" first, then come back to any section while you play
+  with the demo above.
+</p>
+
+<h2>0. Quick tour</h2>
+<div class="card">
+  <p>The demo has three tabs.</p>
+  <ul>
+    <li>
+      <strong>Arm.</strong> An animated chain of links (the "puppet") on the left and its
+      power/amplitude spectrum on the right. They are two views of the exact same data.
+    </li>
+    <li>
+      <strong>Draw.</strong> Sketch any closed-ish shape freehand; the app decomposes it into
+      rotating components and re-draws it as spinning links, the way
+      <a href="https://www.youtube.com/watch?v=-qgreAUpPwM">3Blue1Brown's epicycle animations</a>
+      do.
+    </li>
+    <li>
+      <strong>Control.</strong> The same arm, relabeled with control-theory language:
+      joint-angle traces, a bandwidth (low-pass) slider, and an optional feedback-lag filter.
+    </li>
+  </ul>
+  <p>Interactions that work in every tab that shows the arm or the spectrum:</p>
+  <ul>
+    <li><strong>Drag a joint's tip</strong> in the arm view to move it; every link further out
+      on the chain stays rigidly attached and slides along with it.</li>
+    <li><strong>Drag a stem</strong> in the spectrum view: vertical motion changes that
+      component's amplitude, horizontal motion changes its frequency (it snaps to the nearest
+      integer), and dragging the small ring around a selected stem's head changes its phase.</li>
+    <li><strong>Double-click</strong> empty space in the spectrum to add a new component;
+      <strong>shift-drop</strong> one stem onto another at the same frequency to merge them
+      into one (their coefficients add).</li>
+    <li>In <strong>Draw</strong> mode, the <span class="mono">K</span> slider controls how many
+      of the strongest components are kept in the reconstruction, so you can watch the sketch
+      resolve as <span class="mono">K</span> grows.</li>
+    <li>In <strong>Control</strong>, the <strong>bandwidth</strong> slider truncates the series
+      to frequencies within it, and the <strong>feedback lag</strong> toggle applies a
+      first-order low-pass filter to every component at once.</li>
+  </ul>
+</div>
+
+<h2>1. Fourier analysis</h2>
+
+<div class="card">
+  <h3>1.1 Rotating phasors and the Fourier series</h3>
+  <p>
+    Treat the plane as the complex plane, so a path is a complex-valued function of time
+    $z(t)$. A <em>phasor</em> at frequency $f$ is a unit-rate rotation $e^{i2\pi f t}$: as $t$
+    increases from $0$ to $1$, it sweeps once around the unit circle counter-clockwise if
+    $f>0$. Scaling it by a complex coefficient $c_f = |c_f|e^{i\varphi_f}$ stretches it to
+    radius $|c_f|$ and starts it at angle $\varphi_f$ when $t=0$.
+  </p>
+  <p>
+    A (complex) Fourier series is a sum of such phasors, one per integer frequency:
+  </p>
+  $$ z(t) = \sum_{f=-\infty}^{\infty} c_f\, e^{i2\pi f t}, \qquad t \in [0,1). $$
+  <p>
+    Every $c_f$ traces its own little circle at its own constant rate; the point you actually
+    see, $z(t)$, is the running sum — the tip of the last phasor, chained onto the tip of the
+    one before it. That chaining is exactly how the arm view is drawn.
+  </p>
+
+  <h3>1.2 Recovering the coefficients: orthogonality</h3>
+  <p>
+    The phasors are orthonormal over one period,
+  </p>
+  $$ \int_0^1 e^{i2\pi f t}\, e^{-i2\pi g t}\, dt = \begin{cases}1 & f = g\\ 0 & f \ne g\end{cases}
+     \quad (f, g \in \mathbb{Z}), $$
+  <p>
+    so multiplying $z(t)$ by $e^{-i2\pi f t}$ and integrating kills every term except the one
+    we want:
+  </p>
+  $$ \int_0^1 z(t)\, e^{-i2\pi f t}\, dt
+     = \sum_g c_g \int_0^1 e^{i2\pi (g-f) t}\, dt = c_f. $$
+  <p>
+    That integral is the analysis formula; the sum in §1.1 is the synthesis formula. They are
+    inverses of each other.
+  </p>
+
+  <h3>1.3 From an integral to the DFT</h3>
+  <p>
+    We only ever have finitely many samples, so the demo replaces the integral with a sum over
+    $N$ uniformly-spaced samples $z_n = z(n/N)$, $n = 0,\dots,N-1$:
+  </p>
+  $$ c_f = \frac{1}{N}\sum_{n=0}^{N-1} z_n\, e^{-i2\pi f n / N}, \qquad
+     f = -\tfrac{N}{2}, \dots, \tfrac{N}{2}-1, $$
+  <p>
+    which is the discrete Fourier transform (DFT), normalized so that $c_f$ has the same units
+    and meaning as the continuous coefficient above.
+  </p>
+  <p>
+    <strong>Why resample by arc length?</strong> When you draw freehand, the pointer reports
+    points unevenly in time — slow strokes pile up samples, fast strokes skip over whole
+    stretches of curve. The DFT above assumes evenly-spaced samples of a single lap around the
+    curve; feeding it raw, unevenly-timed pointer samples would silently over-weight the parts
+    of the shape you drew slowly. So before taking the DFT, the drawn curve is closed up and
+    resampled at $N$ points equally spaced by <em>cumulative arc length</em>, which depends only
+    on the shape you drew, not on how fast your hand moved.
+  </p>
+
+  <h3>1.4 Amplitude vs. power, and Parseval</h3>
+  <p>
+    $|c_f|$ is the <em>amplitude spectrum</em>: it's exactly the radius of link $f$ in the arm
+    view. $|c_f|^2$ is the <em>power spectrum</em>. They rank components identically (power is a
+    monotonic function of amplitude), but power adds up meaningfully: Parseval's theorem says
+  </p>
+  $$ \frac{1}{N}\sum_{n=0}^{N-1} |z_n|^2 \;=\; \sum_{f} |c_f|^2, $$
+  <p>
+    so the mean squared "size" of the path is literally partitioned across frequencies — the
+    power spectrum is a budget, and truncating to the top-$K$ components (as Draw mode does)
+    keeps as much of that budget as possible for a given number of links.
+  </p>
+
+  <h3>1.5 Convergence and Gibbs' phenomenon</h3>
+  <p>
+    As you keep more terms (raise $K$, or widen the bandwidth in the Control tab), the partial
+    sum converges to $z(t)$ pointwise wherever the curve is smooth. At a corner or a
+    discontinuity — a square wave's edge, a heart's cusp — the partial sum always overshoots by
+    about $9\%$ of the jump, no matter how many terms you add; the overshoot gets narrower but
+    not shorter. That's <em>Gibbs' phenomenon</em>, and you can watch it as a persistent little
+    "ring" near sharp corners even at high $K$.
+  </p>
+
+  <h3>1.6 Negative frequencies spin the other way</h3>
+  <p>
+    $f>0$ makes $e^{i2\pi f t}$ sweep counter-clockwise as $t$ grows. Flip the sign, $f<0$, and
+    $e^{i2\pi f t}=e^{-i2\pi |f| t}$ sweeps <em>clockwise</em> instead. A real-valued signal
+    (say, just the $x$-coordinate of a drawing) needs both a $+f$ and a $-f$ component of equal
+    amplitude to keep the imaginary parts canceling; a genuinely complex, two-sided path (like
+    an arm's end effector) is free to use them asymmetrically, and does — that asymmetry is
+    what makes the traced path curl one way more than the other.
+  </p>
+</div>
+
+<h2>2. Control theory</h2>
+
+<div class="card">
+  <h3>2.1 A planar serial manipulator</h3>
+  <p>
+    Picture a chain of $n$ rigid links connected by revolute (rotating) joints, all lying flat
+    in the plane, base pinned at the origin. Link $k$ has a fixed length $r_k$ and, at time $t$,
+    points in the absolute direction $\theta_k(t)$ (measured from a fixed reference axis, same
+    for every link). Adding the link vectors tip-to-tail gives <em>forward kinematics</em> — the
+    position of every joint, including the end effector — as a sum of complex link vectors:
+  </p>
+  $$ p_k(t) = \sum_{j=1}^{k} r_j\, e^{i\theta_j(t)}. $$
+  <p>
+    If each joint spins at a constant absolute rate, $\theta_k(t) = \varphi_k + 2\pi f_k t$,
+    this is <em>identical in form</em> to the Fourier partial sum in §1.1, with $c_k = r_k
+    e^{i\varphi_k}$. That's the whole analogy in one equation; §3 spells out the dictionary.
+  </p>
+
+  <h3>2.2 Joint space vs. task space</h3>
+  <p>
+    The $n$ joint angles together are <em>joint space</em>: an $n$-dimensional description of
+    the arm's configuration. What we usually care about — where the end effector actually is,
+    $p_n(t)$ — lives in 2-dimensional <em>task space</em>. Forward kinematics is the map from
+    joint space to task space; it is easy (just evaluate the sum above) and always well
+    defined.
+  </p>
+
+  <h3>2.3 Inverse kinematics and redundancy</h3>
+  <p>
+    Going the other way — given a target point $P$ in task space, find joint angles that reach
+    it — is <em>inverse kinematics</em>, and it is generally hard. When $n>2$, joint space
+    (dimension $n$) is bigger than task space (dimension $2$): infinitely many joint
+    configurations put the tip at the same $P$. Such an arm is <em>redundant</em>, and the
+    leftover $n-2$ degrees of freedom (formally, the null space of the arm's Jacobian) can move
+    the joints around <em>without</em> moving the end effector at all.
+  </p>
+  <p>
+    Dragging in the arm view solves the smallest possible inverse-kinematics problem: moving
+    joint $k$'s own tip to a point $P$ changes only link $k$'s amplitude and phase (two unknowns
+    for two coordinates), leaving every other link's own parameters untouched — see §3.3 for the
+    formula and why the rest of the chain still moves rigidly.
+  </p>
+
+  <h3>2.4 Absolute vs. relative (motor) angles</h3>
+  <p>
+    $\theta_k$ above is an <em>absolute</em> angle, measured against the fixed world frame. But
+    a real motor at joint $k$ is bolted to link $k-1$, not to the world — it can only sense and
+    drive the angle <em>between</em> link $k$ and link $k-1$. That's the <em>relative</em>
+    (motor) angle,
+  </p>
+  $$ q_k(t) = \theta_k(t) - \theta_{k-1}(t), \qquad \theta_0 \equiv 0. $$
+  <p>
+    With constant absolute rates $\theta_k = \varphi_k + 2\pi f_k t$, the motor's angular
+    velocity is $\dot q_k = 2\pi (f_k - f_{k-1})$ — the <em>difference</em> of neighboring
+    frequencies, not $f_k$ itself. Two adjacent links can each be spinning fast in the world
+    frame while the motor between them barely moves, simply because $f_k \approx f_{k-1}$.
+
+  </p>
+
+  <h3>2.5 Feedback, frequency response, and Bode plots</h3>
+  <p>
+    A feedback controller measures the error between a desired output and the actual one and
+    corrects the actuator accordingly; how well it tracks a signal typically depends on that
+    signal's frequency content. The standard way to describe this is the system's <em>frequency
+    response</em> $H(f)$: feed in $e^{i2\pi f t}$, and (for a linear, time-invariant system) the
+    steady-state output is $H(f)\, e^{i2\pi f t}$ — same frequency, but scaled by $|H(f)|$ and
+    shifted in phase by $\arg H(f)$. A
+    <a href="https://en.wikipedia.org/wiki/Bode_plot">Bode plot</a> shows $|H(f)|$ and
+    $\arg H(f)$ against $f$, and is the standard way engineers read off how a controller will
+    treat any given frequency at a glance.
+  </p>
+
+  <h3>2.6 Bandwidth and the first-order lag</h3>
+  <p>
+    A system's <em>bandwidth</em> is (roughly) the range of frequencies it can track without
+    much attenuation or delay; components above it get squashed. A simple, common model of a
+    lagging actuator or filter is the first-order low-pass,
+  </p>
+  $$ H(f) = \frac{1}{1 + i f / f_c}, $$
+  <p>
+    with cutoff frequency $f_c$. Its magnitude is $|H(f)| = 1/\sqrt{1+(f/f_c)^2}$, which equals
+    $1/\sqrt{2}$ (about $71\%$, the conventional bandwidth edge) exactly at $f=f_c$, and its
+    phase $\arg H(f) = -\arctan(f/f_c)$ lags further and further behind as $f$ grows. The
+    Control tab's feedback-lag toggle applies exactly this $H(f)$ to every Fourier coefficient.
+  </p>
+</div>
+
+<h2>3. The link: an arm <em>is</em> a Fourier series</h2>
+
+<div class="card">
+  <p>
+    Compare §1.1's synthesis formula to §2.1's forward kinematics with constant spin rates —
+    they're the same equation. Reading off the correspondence term by term:
+  </p>
+  <table>
+    <tr><td>Fourier component $k$</td><td>&harr;</td><td>Link $k$ of the arm</td></tr>
+    <tr><td>amplitude $|c_k|$</td><td>&harr;</td><td>link length $r_k$</td></tr>
+    <tr><td>frequency $f_k$</td><td>&harr;</td><td>constant spin rate of joint $k$</td></tr>
+    <tr><td>phase $\varphi_k$</td><td>&harr;</td><td>link's angle at $t=0$</td></tr>
+    <tr><td>partial sum over $k$</td><td>&harr;</td><td>the chain of links, tip to tail</td></tr>
+    <tr><td>full sum $z(t)$</td><td>&harr;</td><td>end-effector position $p_n(t)$</td></tr>
+  </table>
+  <p>
+    One shorthand worth being careful about: it's tempting to say "the radius <em>is</em> the
+    frequency," but that's not quite right — a link's <strong>length</strong> is its
+    <strong>amplitude</strong> $|c_k|$, a completely different quantity from its <strong>spin
+    rate</strong> $f_k$. It's an easy slip to make (both numbers are "how big is this
+    component," in different senses), which is exactly why the demo always labels them
+    separately.
+  </p>
+
+  <h3>3.1 Relative motor speed, revisited</h3>
+  <p>
+    §2.4's relative angular velocity $\dot q_k = 2\pi(f_k - f_{k-1})$ now has a clean Fourier
+    reading: it's the gap between consecutive links' frequencies. Sort the links by frequency
+    and adjacent motors move slowly; keep them in an arbitrary order and neighboring motors can
+    be asked to spin arbitrarily fast even though every link's motion, viewed from the fixed
+    world frame, is a perfectly gentle constant-rate rotation.
+  </p>
+
+  <h3>3.2 Truncation is a bandwidth limit</h3>
+  <p>
+    Keeping only $|f| \le B$ frequencies (the Control tab's bandwidth slider, or Draw mode's
+    top-$K$ selection restricted to low frequencies) is exactly a low-pass filter on the path.
+    Physically, it's what you'd get from an arm whose actuators simply cannot spin fast enough
+    to realize any $f_k$ larger than $B$ — a limited-bandwidth actuator turns into a
+    limited-frequency Fourier reconstruction, corners and all (see §1.5's Gibbs ripple).
+  </p>
+
+  <h3>3.3 Dragging a joint, and why the rest of the chain follows</h3>
+  <p>
+    When you drag joint $k$'s tip to a new point $P$ at the current time $t$, the demo only
+    changes link $k$'s own amplitude and phase, by inverting the forward-kinematics formula for
+    that one link:
+  </p>
+  $$ w = \big(P - p_{k-1}(t)\big)\, e^{-i2\pi f_k t}, \qquad
+     |c_k| = |w|, \qquad \varphi_k = \arg(w). $$
+  <p>
+    ($p_{k-1}(t)$, the base of link $k$, is unaffected by this — it only depends on links
+    $1,\dots,k-1$.) Every link <em>downstream</em> of $k$ (links $k+1,\dots,n$) is defined
+    relative to $p_k(t)$, so once $p_k(t)$ jumps to $P$, they are rigidly carried along with it,
+    exactly as if you'd grabbed the middle of a real jointed arm and the far end came with your
+    hand. Nothing about their own amplitudes, frequencies, or phases changes — only their
+    position in the world does.
+  </p>
+
+  <h3>3.4 Feedback lag as a Fourier filter</h3>
+  <p>
+    Turning on feedback lag applies §2.6's $H(f)$ to <em>every</em> coefficient at once:
+    $c_f \mapsto H(f)\, c_f$. Since $|H(f)|<1$ and $\arg H(f)<0$ for $f>0$ (and mirrored for
+    $f<0$), each component shrinks and rotates — more so the higher its frequency — so the
+    whole traced shape shrinks inward and lags behind where it "should" be, exactly the
+    signature of a real feedback loop chasing a fast-moving target through a slow actuator.
+  </p>
+
+  <h3>3.5 Where the analogy breaks down</h3>
+  <p>
+    It's a genuinely useful analogy, not a literal equivalence. Real arms have hard joint
+    limits (a motor can't spin forever, only through some finite range), real dynamics
+    (inertia, torque limits, and gravity couple every joint's required torque to the state and
+    acceleration of every <em>other</em> joint, nonlinearly — unlike our independent, decoupled
+    phasors), and real trajectories are almost never literally sums of constant-rate rotations;
+    they're planned to meet task goals (reach here, avoid that) and are usually far from
+    periodic. Treat the Fourier-arm picture as a clean toy model that makes the frequency-domain
+    intuitions (bandwidth, low-pass filtering, redundancy) tangible, not as a description of how
+    industrial robots are actually driven.
+  </p>
+</div>
+
+<h2>Further reading</h2>
+<div class="card">
+  <ul>
+    <li><a href="https://www.youtube.com/watch?v=-qgreAUpPwM">3Blue1Brown — "Pure Fourier series animation montage"</a> (YouTube)</li>
+    <li><a href="https://en.wikipedia.org/wiki/Fourier_series">Wikipedia — Fourier series</a></li>
+    <li><a href="https://en.wikipedia.org/wiki/Forward_kinematics">Wikipedia — Forward kinematics</a></li>
+    <li><a href="https://en.wikipedia.org/wiki/Bode_plot">Wikipedia — Bode plot</a></li>
+  </ul>
+</div>

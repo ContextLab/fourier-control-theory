@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fourier Series &harr; Robot Arms</title>
+<meta name="description" content="Interactive demo linking Fourier series decomposition to robot-arm control theory.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" integrity="sha384-t1nt8BQoYMLFN5p42tRAtuAAFQaCQODekUVeKKZrEnEyp4H2R0RHFz0KWpmj7i8g" crossorigin="anonymous" referrerpolicy="no-referrer">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" integrity="sha384-n8MVd4RsNIU0tAv4ct0nTaAbDJwPJzDEaqSD1odI+WdtXRGWt2kTvGFasHpSy3SV" crossorigin="anonymous">
+<link rel="stylesheet" href="css/theme.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<nav class="demo-nav">
+  <a href="https://github.com/ContextLab/fourier-control-theory" class="back-link" target="_blank" rel="noopener">
+    <i class="fa-brands fa-github"></i> Source
+  </a>
+  <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
+    <i class="fa-solid fa-moon" id="theme-icon"></i>
+  </button>
+</nav>
+
+<header class="hero-header">
+  <div class="container">
+    <h1 class="hero-title">Fourier Series &harr; Robot Arms</h1>
+    <p class="hero-subtitle">
+      A chain of spinning links is a complex Fourier series in disguise. Drag the arm, drag the
+      spectrum, draw your own shape &mdash; watch the two views of the same math move together.
+    </p>
+  </div>
+</header>
+
+<main class="container">
+  <nav class="tabs" role="tablist">
+    <button class="tab-btn active" id="tab-arm" role="tab" aria-selected="true" data-mode="arm">
+      <i class="fa-solid fa-hand-spock"></i> Arm
+    </button>
+    <button class="tab-btn" id="tab-draw" role="tab" aria-selected="false" data-mode="draw">
+      <i class="fa-solid fa-pen-nib"></i> Draw
+    </button>
+    <button class="tab-btn" id="tab-control" role="tab" aria-selected="false" data-mode="control">
+      <i class="fa-solid fa-sliders"></i> Control
+    </button>
+  </nav>
+
+  <!-- ============ ARM TAB ============ -->
+  <section class="tab-panel active" id="panel-arm" data-panel="arm">
+    <div class="controls-panel">
+      <div class="control-group">
+        <button id="play" class="btn btn-primary" aria-label="Play/pause">
+          <i class="fa-solid fa-pause" id="play-icon"></i>
+        </button>
+      </div>
+      <div class="control-group" style="flex:1; min-width:200px;">
+        <label for="time">t</label>
+        <input type="range" id="time" min="0" max="1" step="0.001" value="0" style="width:100%;">
+      </div>
+      <div class="control-group">
+        <label for="speed">Speed</label>
+        <select id="speed">
+          <option value="0.25">0.25&times;</option>
+          <option value="0.5">0.5&times;</option>
+          <option value="1" selected>1&times;</option>
+          <option value="2">2&times;</option>
+          <option value="4">4&times;</option>
+        </select>
+      </div>
+      <div class="control-group">
+        <label for="yscale-toggle">Spectrum</label>
+        <select id="yscale-toggle">
+          <option value="amp">Amplitude</option>
+          <option value="power">Power</option>
+        </select>
+      </div>
+      <div class="control-group">
+        <label for="circles-toggle"><input type="checkbox" id="circles-toggle" checked> Circles</label>
+      </div>
+      <div class="control-group">
+        <label for="skin-toggle"><input type="checkbox" id="skin-toggle" checked> Show arm skin</label>
+      </div>
+      <div class="control-group">
+        <label for="presets">Preset</label>
+        <select id="presets">
+          <option value="arm" selected>Human arm (5 joints)</option>
+          <option value="">&mdash;</option>
+          <option value="circle">Circle</option>
+          <option value="ellipse">Ellipse</option>
+          <option value="square">Square wave</option>
+          <option value="sawtooth">Sawtooth</option>
+          <option value="star">Star</option>
+          <option value="heart">Heart</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="view-grid">
+      <div>
+        <div class="card view-canvas-wrap">
+          <canvas id="arm-canvas"></canvas>
+        </div>
+        <p class="caption">The puppet arm: each link is one Fourier component &mdash; length = amplitude,
+          spin rate = frequency, starting angle = phase. The fading trail is the end-effector path z(t).
+          With the human-arm preset, the bones (upper arm, forearm, hand, and finger joints) are the
+          components and the skin deforms around them. Drag a joint to rotate that bone (everything
+          downstream follows); shift-drag to also change the bone's length.</p>
+        <div class="card view-canvas-wrap small" style="margin-top: var(--spacing-lg);">
+          <canvas id="spectrum-canvas"></canvas>
+        </div>
+        <p class="caption">Power/amplitude spectrum: one stem per frequency. Drag a stem up/down for
+          amplitude, left/right to change frequency, or around its head to change phase.</p>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Components</span>
+          <button id="add-component" class="btn btn-secondary btn-small"><i class="fa-solid fa-plus"></i> Add</button>
+        </div>
+        <div class="editor-header-row">
+          <span></span><span>Freq</span><span>Amp</span><span>Phase&deg;</span><span></span>
+        </div>
+        <div id="editor"></div>
+        <p class="caption">Each row is one term c&middot;e^(i2&pi;ft) of the series. Selected row is
+          highlighted; edits here, on the arm, or on the spectrum all stay in sync.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DRAW TAB ============ -->
+  <section class="tab-panel" id="panel-draw" data-panel="draw">
+    <div class="draw-layout">
+      <div>
+        <div class="draw-canvas-wrap">
+          <canvas id="draw-canvas"></canvas>
+          <div class="draw-hint" id="draw-hint">Draw a closed shape</div>
+        </div>
+        <p class="caption">Draw a closed curve (or use the preloaded example). It's resampled, DFT'd, and
+          reconstructed epicycle-by-epicycle &mdash; 3Blue1Brown style &mdash; from the top-K components.</p>
+      </div>
+      <div class="draw-panel card">
+        <div class="btn-row">
+          <button id="draw-start" class="btn btn-primary"><i class="fa-solid fa-pen"></i> Draw</button>
+          <button id="draw-clear" class="btn btn-secondary"><i class="fa-solid fa-trash"></i> Clear</button>
+          <button id="draw-play" class="btn btn-secondary"><i class="fa-solid fa-play"></i> Play</button>
+        </div>
+        <div class="control-group" style="width:100%;">
+          <label for="k-slider">K = <span id="k-value">50</span></label>
+          <input type="range" id="k-slider" min="0" max="1000" step="1" value="627" style="flex:1;">
+        </div>
+        <div class="stat-row"><span>RMS error</span><strong id="rms-readout">&mdash;</strong></div>
+        <div class="control-group">
+          <label for="follow-tip"><input type="checkbox" id="follow-tip"> Follow tip (zoom)</label>
+        </div>
+        <button id="send-to-arm" class="btn btn-outline"><i class="fa-solid fa-arrow-right"></i> Send to Arm</button>
+        <p class="caption">K controls how many frequencies are kept. Low K = smooth approximation;
+          high K = near-exact reconstruction of the drawing.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CONTROL TAB ============ -->
+  <section class="tab-panel" id="panel-control" data-panel="control">
+    <div class="view-grid">
+      <div>
+        <div class="card view-canvas-wrap">
+          <canvas id="control-arm-canvas"></canvas>
+        </div>
+        <p class="caption">Same arm, joints numbered 1..N in series order &mdash; think of each as an
+          actuator spinning at a fixed constant velocity (frequency).</p>
+        <div class="card view-canvas-wrap small" style="margin-top: var(--spacing-lg);">
+          <canvas id="joint-canvas"></canvas>
+        </div>
+        <p class="caption">Top: joint angles &theta;<sub>k</sub>(t) over one period (each is a straight
+          ramp for a pure spinning joint). Bottom: mini Bode magnitude plot |c<sub>f</sub>| vs frequency,
+          with the retained passband shaded.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Bandwidth &amp; tracking</span></div>
+        <div class="control-group" style="width:100%;">
+          <label for="bandwidth">Bandwidth B = <span id="bandwidth-value">8</span></label>
+          <input type="range" id="bandwidth" min="0" max="40" step="1" value="8" style="flex:1;">
+        </div>
+        <div class="stat-row"><span>Energy captured</span><strong id="energy-readout">&mdash;</strong></div>
+        <div class="stat-row"><span>Tracking error</span><strong id="tracking-error">&mdash;</strong></div>
+        <hr style="border-color: var(--border-color); margin: var(--spacing-sm) 0;">
+        <div class="control-group">
+          <label for="feedback-toggle"><input type="checkbox" id="feedback-toggle"> Actuator lag (feedback)</label>
+        </div>
+        <div class="control-group" style="width:100%;">
+          <label for="fc-slider">f<sub>c</sub> = <span id="fc-value">5</span></label>
+          <input type="range" id="fc-slider" min="0.5" max="20" step="0.5" value="5" style="flex:1;">
+        </div>
+        <p class="caption">Truncating to |f| &le; B is a hard low-pass filter on actuator bandwidth: only
+          components inside the passband survive, so the tip can only track band-limited paths. The lag
+          toggle instead applies a smooth first-order filter H(f) = 1/(1 + i f/f<sub>c</sub>), shrinking and
+          phase-delaying every component &mdash; a more realistic actuator model.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TUTORIAL ============ -->
+  <section id="tutorial" class="card">
+    <div class="spinner" role="status" aria-label="Loading tutorial"></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" integrity="sha384-XjKyOOlGwcjNTAIQHIpgOno0Hl1YQqzUOEleOLALmuqehneUG+vnGctmUb0ZY0l8" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" integrity="sha384-+VBxd3r6XgURycqtZ117nYw44OOcIax56Z4dCRWbxyPt0Koah1uHoK0o4+/RRE05" crossorigin="anonymous"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
