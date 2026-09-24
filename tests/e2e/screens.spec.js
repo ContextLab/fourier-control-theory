@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 // guessing at drawView.js's internal formula.
 import { sliderToK, K_MAX } from '../../js/ui/drawView.js';
 import { idftEval } from '../../js/core/fourier.js';
+import { GESTURE_MAX_HARMONIC_AMP } from '../../js/core/store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCREENS_DIR = path.join(__dirname, 'screens');
@@ -906,4 +907,109 @@ test('gesture: Control tab bandwidth B=0 freezes the arm at its mean pose', asyn
     expect(Math.abs(p1[id].x - p0[id].x), `${id}.x must be frozen at B=0`).toBeLessThan(2);
     expect(Math.abs(p1[id].y - p0[id].y), `${id}.y must be frozen at B=0`).toBeLessThan(2);
   }
+});
+
+// Regression test for the R4 bug: dragging a gesture harmonic stem upward
+// re-scaled the spectrum's y-axis every frame from the *already-growing*
+// dragged value, so the amplitude kept accelerating even while the pointer
+// held still ("holding the pointer near the top for 40 moves reached 30234
+// rad" — see notes/2026-09-23-handoff-r4-fixes.md). Fixed by freezing the
+// axis scale for the whole drag (spectrumView) and hard-clamping the value at
+// the store boundary (store.updateJointHarmonic). This exercises both with a
+// real mouse: many small steps (checks the per-pixel response is linear, not
+// accelerating) followed by many no-op "holds" at the same spot (checks the
+// value doesn't drift on its own once the pointer stops moving).
+test('gesture: dragging a harmonic stem far upward and holding does not run away', async ({ page }) => {
+  await gotoApp(page);
+  await page.click('#tab-arm');
+
+  // Select the forearm (elbow) joint — the joint the original bug report
+  // repro'd against — via a real click on its arm-view joint marker.
+  await page.evaluate(() => window.fourierDemo.store.set({ playing: false }, 'test'));
+  await page.waitForTimeout(150);
+  const armBox = await page.locator('#arm-canvas').boundingBox();
+  const forearmPx = await page.evaluate(() => window.fourierDemo.armView.gestureJointsPx().forearm);
+  await page.mouse.move(armBox.x + forearmPx.x, armBox.y + forearmPx.y);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => window.fourierDemo.store.get().selectedId)).toBe('forearm');
+
+  const box = await pauseAndBox(page, '#spectrum-canvas');
+  const heads = await page.evaluate(() => window.fourierDemo.spectrumView.stemHeads());
+  const h1 = heads.find((s) => s.h === 1 && !s.isMean);
+  expect(h1, 'forearm must have an h=1 harmonic stem in the default wave preset').toBeTruthy();
+
+  const readAmp = () => page.evaluate(() => {
+    const bones = window.fourierDemo.store.get().gesture.bones;
+    return bones.find((b) => b.id === 'forearm').series.harmonics.find((hm) => hm.h === 1).amp;
+  });
+
+  let x = box.x + h1.x;
+  let y = box.y + h1.y;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+
+  // Many small (2px) upward steps: record the amplitude after each so the
+  // per-step deltas (before the clamp is hit) can be checked for linearity.
+  const STEP_PX = 2;
+  const N_STEPS = 60; // 120px total, comfortably past the top of the plot area
+  const amps = [await readAmp()];
+  for (let i = 0; i < N_STEPS; i += 1) {
+    y -= STEP_PX;
+    await page.mouse.move(x, y, { steps: 1 });
+    amps.push(await readAmp());
+  }
+
+  // Per-step deltas before saturation must be roughly constant (linear
+  // per-pixel response), not accelerating. Compare each delta to the first
+  // (smallest-y, least-saturated) one, only over the still-rising region.
+  const deltas = [];
+  for (let i = 1; i < amps.length; i += 1) {
+    const d = amps[i] - amps[i - 1];
+    if (d <= 1e-9) break; // reached the clamp: no more meaningful deltas
+    deltas.push(d);
+  }
+  expect(deltas.length, 'amplitude must actually rise before saturating').toBeGreaterThan(3);
+  const first = deltas[0];
+  for (const d of deltas) {
+    expect(d, 'per-2px-step amplitude delta must not accelerate').toBeLessThan(first * 1.5);
+    expect(d, 'per-2px-step amplitude delta must not collapse to ~0 before the clamp').toBeGreaterThan(first * 0.5);
+  }
+
+  // Now hold near the top: fire 40 more pointer moves that jitter by 1px
+  // (real hardware never holds a perfectly identical pixel) without net
+  // upward movement, and confirm the amplitude does NOT keep climbing.
+  const beforeHold = await readAmp();
+  for (let i = 0; i < 40; i += 1) {
+    await page.mouse.move(x + (i % 2), y, { steps: 1 });
+  }
+  const afterHold = await readAmp();
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+
+  expect(afterHold, 'holding still must not let the amplitude keep growing').toBeCloseTo(beforeHold, 6);
+  expect(afterHold, 'amplitude must never exceed the store clamp').toBeLessThanOrEqual(GESTURE_MAX_HARMONIC_AMP + 1e-9);
+  for (const a of amps) {
+    expect(a, 'amplitude must never exceed the store clamp at any point during the drag').toBeLessThanOrEqual(GESTURE_MAX_HARMONIC_AMP + 1e-9);
+  }
+
+  // "elbow stays sane": the forearm's angle over a full period must stay
+  // finite and nowhere near the reported runaway (~30234 rad) — a generous
+  // bound of one full turn (2*pi rad either side) is already far below that
+  // and well above any deliberately-set clamp-bounded value.
+  const maxAbsAngle = await page.evaluate(() => {
+    const bones = window.fourierDemo.store.get().gesture.bones;
+    const forearm = bones.find((b) => b.id === 'forearm');
+    let maxAbs = 0;
+    for (let i = 0; i <= 100; i += 1) {
+      const t = i / 100;
+      let v = forearm.series.mean;
+      for (const hm of forearm.series.harmonics) v += hm.amp * Math.cos(2 * Math.PI * hm.h * t + hm.phase);
+      maxAbs = Math.max(maxAbs, Math.abs(v));
+    }
+    return maxAbs;
+  });
+  expect(Number.isFinite(maxAbsAngle)).toBe(true);
+  expect(maxAbsAngle, 'elbow angle must stay sane, nowhere near the reported runaway').toBeLessThan(2 * Math.PI);
 });

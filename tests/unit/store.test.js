@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createStore, sanitizeComponent, MAX_FREQ, MAX_AMP, PALETTE } from '../../js/core/store.js';
+import { createStore, sanitizeComponent, MAX_FREQ, MAX_AMP, PALETTE, GESTURE_MAX_HARMONIC_AMP } from '../../js/core/store.js';
 
 test('createStore starts with the documented default shape', () => {
   const store = createStore();
@@ -340,4 +340,26 @@ test('updateJointHarmonic patches one harmonic of one joint by (id, h)', () => {
   const harmonics = store.get().gesture.bones[0].series.harmonics;
   assert.deepEqual(harmonics[0], { h: 1, amp: 0.2, phase: 0 }); // untouched
   assert.deepEqual(harmonics[1], { h: 2, amp: 0.5, phase: 1 }); // amp patched, phase kept
+});
+
+test('updateJointHarmonic clamps amp to GESTURE_MAX_HARMONIC_AMP regardless of how large the input is', () => {
+  const store = createStore();
+  store.setGesture([
+    { id: 'a', parent: null, length: 1, series: { mean: 0, harmonics: [{ h: 1, amp: 0.2, phase: 0 }] } },
+  ]);
+  store.updateJointHarmonic('a', 1, { amp: 30234 }, 'spectrum');
+  assert.equal(store.get().gesture.bones[0].series.harmonics[0].amp, GESTURE_MAX_HARMONIC_AMP);
+
+  store.updateJointHarmonic('a', 1, { amp: -30234 }, 'spectrum');
+  assert.equal(store.get().gesture.bones[0].series.harmonics[0].amp, GESTURE_MAX_HARMONIC_AMP); // abs, then clamp
+
+  store.updateJointHarmonic('a', 1, { amp: Infinity }, 'spectrum');
+  assert.equal(store.get().gesture.bones[0].series.harmonics[0].amp, GESTURE_MAX_HARMONIC_AMP);
+
+  store.updateJointHarmonic('a', 1, { amp: NaN }, 'spectrum');
+  assert.equal(store.get().gesture.bones[0].series.harmonics[0].amp, 0);
+
+  store.updateJointHarmonic('a', 1, { phase: 100 * Math.PI }, 'spectrum');
+  const wrapped = store.get().gesture.bones[0].series.harmonics[0].phase;
+  assert.ok(wrapped > -Math.PI && wrapped <= Math.PI);
 });

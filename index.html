@@ -185,10 +185,12 @@
         <div class="card view-canvas-wrap">
           <canvas id="control-arm-canvas" tabindex="0" aria-label="Band-limited or actuator-lag-filtered robot arm reconstruction (not interactive)."></canvas>
         </div>
-        <p class="caption">The filtered arm: joints numbered 1..N in series order, built only from the
-          components that survive the bandwidth (and, when enabled, actuator-lag) filter below &mdash;
-          think of each as an actuator spinning at a fixed constant velocity (frequency). This view is not
-          interactive; go to the Arm tab to drag joints or spectrum stems.</p>
+        <p class="caption">The filtered arm: the same motion as the Arm tab, rebuilt from only what
+          survives the bandwidth limit (and, when enabled, the actuator-lag filter) below. For a gesture,
+          each joint keeps only its angle harmonics with h &le; B, so the wave shrinks and a pick-up can miss
+          the ball; for the Fourier-spin arm, each link is a constant-velocity actuator and only links with
+          |f| &le; B survive. This view is not interactive; go to the Arm tab to drag joints or spectrum
+          stems.</p>
         <div class="control-group" style="margin-bottom:0;">
           <label for="angle-mode">Angles</label>
           <select id="angle-mode" title="Absolute joint angle θ_k, or relative (motor) angle q_k = θ_k − θ_(k-1)">

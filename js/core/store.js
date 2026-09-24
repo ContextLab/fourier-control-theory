@@ -231,13 +231,17 @@ export function createStore(initial = {}) {
       if (!state.gesture) return;
       const safePatch = { ...patch };
       if (safePatch.amp !== undefined) {
+        // Same NaN/Infinity handling as sanitizeComponent: NaN -> 0, and
+        // +-Infinity clamp to the max like any other too-large value (clamp
+        // handles Infinity naturally via Math.min).
         let amp = Number(safePatch.amp);
-        if (!Number.isFinite(amp)) amp = 0;
-        safePatch.amp = clamp(Math.abs(amp), 0, GESTURE_MAX_HARMONIC_AMP);
+        amp = Number.isNaN(amp) ? 0 : Math.abs(amp);
+        safePatch.amp = clamp(amp, 0, GESTURE_MAX_HARMONIC_AMP);
       }
       if (safePatch.phase !== undefined) {
-        const phase = Number(safePatch.phase);
-        safePatch.phase = Number.isFinite(phase) ? wrapPhase(phase) : 0;
+        let phase = Number(safePatch.phase);
+        phase = Number.isFinite(phase) ? phase : 0;
+        safePatch.phase = wrapPhase(phase);
       }
       const bones = state.gesture.bones.map((b) => {
         if (b.id !== id) return b;
